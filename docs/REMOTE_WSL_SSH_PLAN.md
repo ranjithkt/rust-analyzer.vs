@@ -18,13 +18,18 @@ It is intentionally **design-only** (no implementation).
 2. [Goals and Constraints](#goals-and-constraints)
 3. [Proposed Architecture](#proposed-architecture-target-system--execution-context)
 4. [Interface Contracts](#interface-contracts)
-5. [WSL Plan](#wsl-plan-phased)
-6. [SSH Plan](#ssh-plan-two-approaches)
-7. [Refactors Required](#refactors-required-surgical-not-a-rewrite)
-8. [Error Handling Strategy](#error-handling-strategy)
-9. [Rollout Plan](#rollout-plan-risk-controlled)
-10. [Testing Strategy](#testing-strategy)
-11. [Risk Assessment](#risk-assessment)
+5. [MEF Integration](#mef-integration)
+6. [WSL Plan](#wsl-plan-phased)
+7. [SSH Plan](#ssh-plan-two-approaches)
+8. [Refactors Required](#refactors-required-surgical-not-a-rewrite)
+9. [Error Handling Strategy](#error-handling-strategy)
+10. [Rollout Plan](#rollout-plan-risk-controlled)
+11. [Testing Strategy](#testing-strategy)
+12. [Risk Assessment](#risk-assessment)
+13. [Logging and Diagnostics](#logging-and-diagnostics)
+14. [Appendix: File Changes Summary](#appendix-file-changes-summary)
+15. [Appendix: Glossary](#appendix-glossary)
+16. [Appendix: Design Decisions Summary](#appendix-design-decisions-summary)
 
 ---
 
@@ -100,10 +105,131 @@ public PathEx WorkspaceRoot { get; set; }
 - When cargo runs in WSL, paths are Linux format.
 - Deserializing into `PathEx` corrupts them.
 
-**Critical design implication:** Any plan that runs `cargo metadata` (and/or consumes `cargo` JSON messages) on Linux/remote **cannot reuse the existing `Workspace` DTOs** as-is. We must either:
+**Critical design implication:** Any plan that runs `cargo metadata` (and/or consumes `cargo` JSON messages) on Linux/remote **cannot reuse the existing `Workspace` DTOs** as-is.
 
-- Introduce parallel DTOs that deserialize into `string`/`RemotePath`, and then map into VS-visible paths at the boundary, **or**
-- Make `Workspace` DTOs path-type-agnostic (high risk; touches a lot of code).
+**DECISION: Use Raw DTO + Factory Pattern**
+
+We will use parallel DTOs that deserialize into `string`, then convert to VS-visible paths at the boundary:
+
+```csharp
+// NEW: Raw DTOs with string paths (what JSON deserializes into directly)
+internal class RawWorkspace
+{
+    [JsonProperty("version")]
+    public int Version { get; set; }
+
+    [JsonProperty("workspace_root")]
+    public string WorkspaceRoot { get; set; }
+
+    [JsonProperty("target_directory")]
+    public string TargetDirectory { get; set; }
+
+    [JsonProperty("packages")]
+    public List<RawPackage> Packages { get; set; }
+}
+
+internal class RawPackage
+{
+    [JsonProperty("name")]
+    public string Name { get; set; }
+
+    [JsonProperty("manifest_path")]
+    public string ManifestPath { get; set; }
+
+    [JsonProperty("targets")]
+    public List<RawTarget> Targets { get; set; }
+}
+
+internal class RawTarget
+{
+    [JsonProperty("name")]
+    public string Name { get; set; }
+
+    [JsonProperty("src_path")]
+    public string SourcePath { get; set; }
+
+    [JsonProperty("kind")]
+    public Workspace.Kind[] Kinds { get; set; }
+
+    [JsonProperty("crate_types")]
+    public Workspace.CrateType[] CrateTypes { get; set; }
+}
+
+// NEW: Factory that converts RawWorkspace → Workspace using path mapper
+public class WorkspaceFactory
+{
+    public Workspace Create(RawWorkspace raw, IPathMapper mapper)
+    {
+        var workspace = new Workspace
+        {
+            Version = raw.Version,
+            WorkspaceRoot = MapPath(raw.WorkspaceRoot, mapper),
+            TargetDirectory = MapPath(raw.TargetDirectory, mapper),
+        };
+
+        foreach (var rawPkg in raw.Packages ?? Enumerable.Empty<RawPackage>())
+        {
+            var pkg = new Workspace.Package
+            {
+                Name = rawPkg.Name,
+                ManifestPath = MapPath(rawPkg.ManifestPath, mapper),
+            };
+
+            foreach (var rawTarget in rawPkg.Targets ?? Enumerable.Empty<RawTarget>())
+            {
+                pkg.Targets.Add(new Workspace.Target
+                {
+                    Name = rawTarget.Name,
+                    SourcePath = MapPath(rawTarget.SourcePath, mapper),
+                    Kinds = rawTarget.Kinds,
+                    CrateTypes = rawTarget.CrateTypes,
+                });
+            }
+
+            workspace.Packages.Add(pkg);
+        }
+
+        return workspace;
+    }
+
+    private PathEx MapPath(string remotePath, IPathMapper mapper)
+    {
+        if (mapper == null || mapper.Kind == TargetKind.Local)
+        {
+            return (PathEx)remotePath;
+        }
+
+        // Remote path from cargo output - convert to VS-visible path
+        return mapper.MapToLocal(new RemotePath(remotePath, mapper.Kind));
+    }
+}
+```
+
+**Updated ToolchainService.GetWorkspaceAsync:**
+
+```csharp
+public async Task<Workspace> GetWorkspaceAsync(PathEx manifestPath, IPathMapper pathMapper, CancellationToken ct)
+{
+    var ctx = _targetSystemService.CurrentTarget.GetExecutionContext();
+
+    string[] args = new[] { "metadata", "--no-deps", "--format-version", "1",
+                            "--manifest-path", GetRemoteManifestPath(manifestPath, pathMapper),
+                            "--offline" };
+
+    var result = await ctx.ExecuteAndCaptureAsync("cargo", args,
+        GetRemoteWorkingDir(manifestPath, pathMapper), ct);
+
+    var json = string.Join(string.Empty, result);
+    var rawWorkspace = JsonConvert.DeserializeObject<RawWorkspace>(json);
+
+    return _workspaceFactory.Create(rawWorkspace, pathMapper);
+}
+```
+
+This approach:
+- Keeps existing `Workspace` DTOs unchanged (low risk)
+- Path mapping happens at a single boundary point
+- Easy to unit test the factory in isolation
 
 ### Existing Remote Infrastructure (Untapped)
 
@@ -208,6 +334,74 @@ Responsibilities:
 - Populate the **Target System** combo UI (replacing `TemporaryTargetSystemStore`).
 - Persist selection via existing workspace-scoped settings (`ISettingsService`).
 - Raise events when target system changes.
+
+#### Target Change Event Handler Sequence
+
+When user changes target system via the combo, the following sequence MUST execute:
+
+```csharp
+private async Task OnTargetChangedAsync(TargetChangedEventArgs e, CancellationToken ct)
+{
+    _logger.WriteLine($"Target changing: {e.OldTarget?.Id} → {e.NewTarget.Id}");
+
+    // 1. Stop rust-analyzer on old target (if running)
+    if (_languageClient?.Rpc != null)
+    {
+        _logger.WriteLine("Stopping rust-analyzer on old target...");
+        await _languageClient.StopServerAsync();
+    }
+
+    // 2. Clear MetadataService cache (packages are target-specific)
+    _metadataService.ClearCache();
+    _logger.WriteLine("Cleared metadata cache.");
+
+    // 3. Invalidate all test containers (test executables are target-specific)
+    _testContainerDiscoverer.InvalidateAllContainers();
+    _logger.WriteLine("Invalidated test containers.");
+
+    // 4. Clear stale diagnostics from Error List
+    // (diagnostics from old target have wrong paths for new target)
+    ClearBuildDiagnostics();
+    _logger.WriteLine("Cleared Error List.");
+
+    // 5. Run prerequisites check for new target
+    var prereqResult = await _preReqsCheckService.CheckForTargetAsync(e.NewTarget, ct);
+    if (!prereqResult.Success)
+    {
+        _logger.WriteError($"Prerequisites failed for {e.NewTarget.Id}: {prereqResult.Message}");
+        await ShowPrereqFailureDialogAsync(prereqResult, e.NewTarget);
+
+        // Optionally revert to old target or local
+        return;
+    }
+
+    // 6. Persist selection
+    await _settingsService.SetAsync(
+        SettingsInfo.TypeTargetSystem,
+        _workspaceRoot,
+        e.NewTarget.Id);
+
+    // 7. Notify UI to refresh (e.g., rebuild file icons, etc.)
+    TargetChanged?.Invoke(this, e);
+
+    // 8. rust-analyzer will restart lazily on first .rs file interaction
+    // (LanguageClient.ActivateAsync will use the new target)
+
+    _logger.WriteLine($"Target change complete: now using {e.NewTarget.Id}");
+    _telemetry.TrackEvent("TargetChanged",
+        ("From", e.OldTarget?.Id ?? "none"),
+        ("To", e.NewTarget.Id));
+}
+
+private void ClearBuildDiagnostics()
+{
+    // Clear VS Error List entries from previous build
+    // Implementation depends on how diagnostics were reported
+    _buildOutputSink?.Clear();
+}
+```
+
+**Important:** This sequence ensures no stale state from the old target leaks into the new target context.
 
 ### `IExecutionContext` (The Key Seam)
 
@@ -409,6 +603,120 @@ public interface IProcessOutputSink
 
 ---
 
+## MEF Integration
+
+The existing codebase uses MEF (Managed Extensibility Framework) for dependency injection. New services must integrate properly.
+
+### Service Registration Pattern
+
+```csharp
+// Factory for per-workspace services (ITargetSystemService is workspace-scoped)
+[Export(typeof(ITargetSystemServiceFactory))]
+[PartCreationPolicy(CreationPolicy.Shared)]
+public class TargetSystemServiceFactory : ITargetSystemServiceFactory
+{
+    [Import]
+    public ILogger L { get; set; }
+
+    [Import]
+    public ITelemetryService T { get; set; }
+
+    [Import]
+    public ISettingsService SettingsService { get; set; }
+
+    public ITargetSystemService Create(IWorkspace workspace)
+    {
+        return new TargetSystemService(workspace, SettingsService, new TL { L = L, T = T });
+    }
+}
+
+public interface ITargetSystemServiceFactory
+{
+    ITargetSystemService Create(IWorkspace workspace);
+}
+```
+
+### Extending MetadataServiceFactory
+
+The existing `MetadataServiceFactory` must be updated to use target system:
+
+```csharp
+[Export(typeof(IMetadataServiceFactory))]
+[PartCreationPolicy(CreationPolicy.Shared)]
+public class MetadataServiceFactory : IMetadataServiceFactory
+{
+    [Import]
+    public IToolchainService CargoService { get; set; }
+
+    [Import]
+    public ITargetSystemServiceFactory TargetSystemServiceFactory { get; set; }
+
+    [Import]
+    public ILogger L { get; set; }
+
+    [Import]
+    public ITelemetryService T { get; set; }
+
+    public IMetadataService Create(IWorkspace workspace)
+    {
+        var targetService = TargetSystemServiceFactory.Create(workspace);
+        return new MetadataService(
+            CargoService,
+            targetService,  // NEW: Pass target service
+            (PathEx)workspace.Location,
+            new TL { L = L, T = T });
+    }
+}
+```
+
+### Workspace Context Provider
+
+Access to the current workspace's target system from any component:
+
+```csharp
+[Export(typeof(IWorkspaceContextAccessor))]
+[PartCreationPolicy(CreationPolicy.Shared)]
+public class WorkspaceContextAccessor : IWorkspaceContextAccessor
+{
+    [Import]
+    public IVsFolderWorkspaceService WorkspaceService { get; set; }
+
+    [Import]
+    public ITargetSystemServiceFactory TargetSystemServiceFactory { get; set; }
+
+    private readonly ConcurrentDictionary<string, ITargetSystemService> _cache = new();
+
+    public ITargetSystemService GetTargetSystemService()
+    {
+        var workspace = WorkspaceService.CurrentWorkspace;
+        if (workspace == null) return null;
+
+        return _cache.GetOrAdd(
+            workspace.Location,
+            _ => TargetSystemServiceFactory.Create(workspace));
+    }
+
+    public IPathMapper GetCurrentPathMapper()
+    {
+        return GetTargetSystemService()?.CurrentTarget?.GetPathMapper();
+    }
+
+    public IExecutionContext GetCurrentExecutionContext()
+    {
+        return GetTargetSystemService()?.CurrentTarget?.GetExecutionContext();
+    }
+}
+
+public interface IWorkspaceContextAccessor
+{
+    ITargetSystemService GetTargetSystemService();
+    IPathMapper GetCurrentPathMapper();
+    IExecutionContext GetCurrentExecutionContext();
+}
+```
+
+---
+
 ## WSL Plan (Phased)
 
 WSL should be implemented first because VS already supports opening `\\wsl$` folders and the extension roadmap mentions WSL2.
@@ -425,6 +733,62 @@ For this extension, prefer **native UNC + `wsl.exe` execution** for WSL support 
 
 Reference: [Connect to your remote Linux system by using Visual Studio](https://learn.microsoft.com/en-us/cpp/linux/connect-to-your-remote-linux-computer?view=msvc-160).
 
+### WSL1 vs WSL2 Considerations
+
+| Aspect | WSL1 | WSL2 |
+|--------|------|------|
+| **Path format** | `\\wsl$\Distro\...` | `\\wsl$\Distro\...` or `\\wsl.localhost\Distro\...` |
+| **Networking** | Shares Windows localhost | Own IP address (NAT'd VM) |
+| **Filesystem** | Windows FS with translation layer | Real ext4 filesystem |
+| **Linux I/O Performance** | Slower (translation overhead) | Native speed |
+| **Windows I/O Performance** | Native speed | Slower (9P protocol) |
+| **Debug (gdbserver)** | `localhost:<port>` works | May need explicit WSL IP or port forwarding |
+
+**Recommendation:** WSL2 is the recommended target due to better Linux compatibility and performance for Rust builds. However, both versions are supported.
+
+**Detection:**
+
+```csharp
+public async Task<WslVersion> DetectWslVersionAsync(string distroName, CancellationToken ct)
+{
+    var result = await ExecuteAndCaptureAsync(
+        "wsl.exe",
+        new[] { "-l", "-v" },
+        new RemotePath("/", TargetKind.Local),
+        ct);
+
+    // Parse output like:
+    //   NAME      STATE           VERSION
+    // * Ubuntu    Running         2
+    foreach (var line in result)
+    {
+        if (line.Contains(distroName, StringComparison.OrdinalIgnoreCase))
+        {
+            if (line.TrimEnd().EndsWith("2")) return WslVersion.Wsl2;
+            if (line.TrimEnd().EndsWith("1")) return WslVersion.Wsl1;
+        }
+    }
+
+    return WslVersion.Unknown;
+}
+
+public enum WslVersion { Unknown, Wsl1, Wsl2 }
+```
+
+**WSL2 Networking for Debugging (Phase W3):**
+
+For WSL2, `localhost` port forwarding usually works automatically for newer Windows versions. If not:
+
+```csharp
+// Get WSL2 IP address for gdbserver connection
+var ipResult = await ctx.ExecuteAndCaptureAsync(
+    "hostname", new[] { "-I" },
+    new RemotePath("/", TargetKind.Wsl), ct);
+
+var wslIp = ipResult.FirstOrDefault()?.Split(' ').FirstOrDefault()?.Trim();
+// Use wslIp instead of "localhost" when connecting to gdbserver
+```
+
 ### Phase W0 — Infrastructure Foundation (NEW)
 
 Before any WSL functionality, create the foundational abstractions.
@@ -439,6 +803,96 @@ Before any WSL functionality, create the foundational abstractions.
 6. Add feature flags in `Options`:
    - `EnableWslSupport` (default: false during development)
    - `EnableSshSupport` (default: false during development)
+
+#### Feature Flags Implementation
+
+```csharp
+// In Options.cs - add to existing GeneralOptions
+public class GeneralOptions : BaseOptionPage<GeneralOptionsModel>
+{
+}
+
+public class GeneralOptionsModel : BaseOptionModel<GeneralOptionsModel>
+{
+    // ... existing options ...
+
+    [Category("Remote Development (Preview)")]
+    [DisplayName("Enable WSL Support")]
+    [Description("Enable building, testing, and debugging Rust projects in Windows Subsystem for Linux. " +
+                 "When enabled, WSL distros will appear in the Target System dropdown. " +
+                 "Requires Visual Studio restart to take effect.")]
+    [DefaultValue(false)]
+    public bool EnableWslSupport { get; set; } = false;
+
+    [Category("Remote Development (Preview)")]
+    [DisplayName("Enable SSH Support")]
+    [Description("Enable building, testing, and debugging Rust projects on remote Linux hosts via SSH. " +
+                 "When enabled, SSH profiles will appear in the Target System dropdown. " +
+                 "Requires Visual Studio restart to take effect.")]
+    [DefaultValue(false)]
+    public bool EnableSshSupport { get; set; } = false;
+}
+```
+
+**Usage in TargetSystemService:**
+
+```csharp
+public class TargetSystemService : ITargetSystemService
+{
+    public IReadOnlyList<ITargetSystem> AvailableTargets
+    {
+        get
+        {
+            var targets = new List<ITargetSystem>();
+
+            // Local is always available
+            targets.Add(new LocalTargetSystem());
+
+            // Check feature flags (requires restart, so can cache)
+            var options = GeneralOptionsModel.Instance;
+
+            if (options.EnableWslSupport)
+            {
+                targets.AddRange(EnumerateWslDistros());
+            }
+
+            if (options.EnableSshSupport)
+            {
+                targets.AddRange(GetSshProfiles());
+            }
+
+            return targets.AsReadOnly();
+        }
+    }
+
+    private IEnumerable<ITargetSystem> EnumerateWslDistros()
+    {
+        // Run: wsl.exe --list --quiet
+        // Parse output and create WslTargetSystem for each distro
+        try
+        {
+            using var proc = ProcessRunner.Run(
+                "wsl.exe", new[] { "--list", "--quiet" },
+                null, null, CancellationToken.None);
+            proc.Wait(TimeSpan.FromSeconds(5));
+
+            return proc.StandardOutputLines
+                .Where(line => !string.IsNullOrWhiteSpace(line))
+                .Select(distro => new WslTargetSystem(distro.Trim()));
+        }
+        catch
+        {
+            return Enumerable.Empty<ITargetSystem>();
+        }
+    }
+}
+```
+
+**UI Behavior:**
+- When `EnableWslSupport = false`: Target System combo shows only "Local Machine"
+- When `EnableWslSupport = true`: Target System combo shows "Local Machine" + detected WSL distros
+- Changing the option requires VS restart (displayed in option description)
+- Invalid/inaccessible targets are filtered out with warning logged
 
 **WslPathMapper Implementation:**
 
@@ -635,11 +1089,129 @@ public class WslExecutionContext : IExecutionContext
 
 **Pitfalls for WSL execution to address explicitly:**
 
-- **Cancellation**: killing `wsl.exe` does not always kill the remote child process tree. Decide whether to:
-  - tolerate orphaned processes, or
-  - track and explicitly kill remote PIDs (requires additional plumbing).
+- **Cancellation**: killing `wsl.exe` does not always kill the remote child process tree.
 - **Environment + quoting**: `env KEY=VALUE` needs escaping; values may contain spaces/quotes.
 - **Newlines/encoding**: ensure UTF-8 output handling matches current assumptions.
+
+#### DECISION: WSL Process Cancellation Strategy
+
+Use **process groups with explicit cleanup** via `setsid` and `pkill`:
+
+```csharp
+public class WslExecutionContext : IExecutionContext
+{
+    private int? _lastRemotePgid;
+
+    public async Task<ProcessResult> ExecuteAsync(
+        string command,
+        IEnumerable<string> arguments,
+        RemotePath workingDirectory,
+        IDictionary<string, string> environment,
+        IProcessOutputSink outputSink,
+        CancellationToken ct)
+    {
+        // Start command in its own process group using setsid
+        // This allows us to kill the entire process tree on cancellation
+        var wslArgs = new List<string>
+        {
+            "-d", _distroName,
+            "--cd", (string)workingDirectory,
+            "--",
+            "setsid", "--fork",  // Creates new session/process group
+        };
+
+        // Add environment variables
+        if (environment?.Any() == true)
+        {
+            wslArgs.Add("env");
+            foreach (var kv in environment)
+            {
+                // Escape values that contain special characters
+                var escapedValue = EscapeForShell(kv.Value);
+                wslArgs.Add($"{kv.Key}={escapedValue}");
+            }
+        }
+
+        wslArgs.Add(command);
+        wslArgs.AddRange(arguments);
+
+        // Register cancellation handler BEFORE starting process
+        using var ctRegistration = ct.Register(() => KillRemoteProcessGroup());
+
+        using var proc = ProcessRunner.Run(
+            "wsl.exe",
+            wslArgs.ToArray(),
+            workingDirectory: null,
+            env: null,
+            cancellationToken: CancellationToken.None);  // Don't pass ct here - we handle it manually
+
+        outputSink?.OnProcessStarted(proc.ProcessId);
+
+        // Capture the remote PGID for cleanup
+        // The PGID equals the PID of the session leader (our command)
+        _lastRemotePgid = await GetRemotePgidAsync(command, ct);
+
+        var exitCode = await proc;
+        outputSink?.OnProcessExited(exitCode);
+
+        _lastRemotePgid = null;  // Clear after normal exit
+
+        return new ProcessResult
+        {
+            ExitCode = exitCode,
+            StandardOutput = proc.StandardOutputLines.ToList(),
+            StandardError = proc.StandardErrorLines.ToList()
+        };
+    }
+
+    private void KillRemoteProcessGroup()
+    {
+        if (_lastRemotePgid == null) return;
+
+        _logger.WriteLine($"Cancellation requested - killing remote PGID {_lastRemotePgid}");
+
+        try
+        {
+            // Kill the entire process group with SIGTERM, then SIGKILL
+            using var killProc = ProcessRunner.Run(
+                "wsl.exe",
+                new[] { "-d", _distroName, "--", "pkill", "-TERM", "-g", _lastRemotePgid.ToString() },
+                workingDirectory: null,
+                env: null,
+                cancellationToken: CancellationToken.None);
+
+            killProc.Wait(TimeSpan.FromSeconds(2));
+
+            // Follow up with SIGKILL if processes still exist
+            using var killProc2 = ProcessRunner.Run(
+                "wsl.exe",
+                new[] { "-d", _distroName, "--", "pkill", "-KILL", "-g", _lastRemotePgid.ToString() },
+                workingDirectory: null,
+                env: null,
+                cancellationToken: CancellationToken.None);
+
+            killProc2.Wait(TimeSpan.FromSeconds(1));
+        }
+        catch (Exception ex)
+        {
+            _logger.WriteError($"Failed to kill remote process group: {ex.Message}");
+        }
+    }
+
+    private static string EscapeForShell(string value)
+    {
+        // Escape single quotes and wrap in single quotes
+        if (string.IsNullOrEmpty(value)) return "''";
+        return "'" + value.Replace("'", "'\\''") + "'";
+    }
+}
+```
+
+**Why this approach:**
+- `setsid --fork` creates a new process group, isolating our command
+- `pkill -g <pgid>` kills all processes in that group
+- Two-phase kill (SIGTERM then SIGKILL) allows graceful shutdown
+- Prevents orphaned cargo/rustc processes consuming resources
 
 **Diagnostics Path Mapping:**
 
@@ -779,19 +1351,143 @@ public class TestDiscoverer : BaseTestDiscoverer, ITestDiscoverer
 **Critical missing dependency in current codebase:** The existing test discovery path extraction logic and regexes are Windows-`.exe` oriented (e.g., parsing `Executable ... (..\.exe)` from cargo output). For WSL/SSH we must explicitly plan to:
 
 - Stop using Windows-only regexes for “test executable path” detection in remote mode.
-- Use `--message-format json` (or `cargo metadata`) for remote test executable discovery so it is OS-neutral.
+- Use `--message-format json` for remote test executable discovery so it is OS-neutral.
 
-**Test container location (design decision required):**
+#### Remote Test Executable Discovery Implementation
+
+```csharp
+/// <summary>
+/// Discovers test executables using cargo's JSON output format.
+/// Works for both local and remote targets (Linux has no .exe extension).
+/// </summary>
+public async Task<IEnumerable<RemotePath>> GetTestExecutablesFromJsonAsync(
+    RemotePath manifestDir,
+    IExecutionContext ctx,
+    string profile,
+    string additionalArgs,
+    CancellationToken ct)
+{
+    // Run: cargo test --no-run --message-format=json
+    var args = new List<string>
+    {
+        "test", "--no-run",
+        "--message-format=json",
+        "--profile", profile
+    };
+
+    if (!string.IsNullOrEmpty(additionalArgs))
+    {
+        args.AddRange(additionalArgs.Split(' ', StringSplitOptions.RemoveEmptyEntries));
+    }
+
+    var result = await ctx.ExecuteAsync(
+        "cargo",
+        args,
+        manifestDir,
+        environment: null,
+        outputSink: null,
+        ct);
+
+    var executables = new List<RemotePath>();
+
+    foreach (var line in result.StandardOutput)
+    {
+        if (string.IsNullOrWhiteSpace(line) || !line.TrimStart().StartsWith("{"))
+            continue;
+
+        try
+        {
+            var msg = JObject.Parse(line);
+
+            // Look for compiler-artifact messages with test targets
+            if (msg["reason"]?.Value<string>() != "compiler-artifact")
+                continue;
+
+            var targetKinds = msg["target"]?["kind"]?.ToObject<string[]>();
+            if (targetKinds == null)
+                continue;
+
+            // Test executables have kind "test" or "bench" or are built with test profile
+            bool isTestArtifact =
+                targetKinds.Contains("test") ||
+                targetKinds.Contains("bench") ||
+                (msg["profile"]?["test"]?.Value<bool>() == true);
+
+            if (!isTestArtifact)
+                continue;
+
+            // The "executable" field contains the path to the test binary
+            var exePath = msg["executable"]?.Value<string>();
+            if (!string.IsNullOrEmpty(exePath))
+            {
+                executables.Add(new RemotePath(exePath, ctx.Kind));
+            }
+        }
+        catch (JsonException)
+        {
+            // Not valid JSON, skip
+        }
+    }
+
+    return executables;
+}
+```
+
+**Key differences from current Windows implementation:**
+
+| Aspect | Current (Windows) | New (Remote/JSON) |
+|--------|-------------------|-------------------|
+| Detection method | Regex on stderr | JSON parsing on stdout |
+| Path format | `...\target\debug\deps\foo-abc123.exe` | `/home/.../target/debug/deps/foo-abc123` |
+| Extension | `.exe` required | No extension on Linux |
+| Reliability | Fragile (regex can break) | Stable (cargo's public API) |
+
+**Test container location - DECISION: Approach A (Generate Locally)**
 
 The extension currently writes `.rusttests` containers into the cargo target directory. For remote targets:
 
 - **WSL**: writing into the target directory on the UNC filesystem is acceptable (VS can read them).
 - **SSH cache mode (S2)**: remote build writes containers on the remote filesystem, but VS is reading from the local cache.
 
-Decide and document one approach:
+**DECISION:** Generate `.rusttests` containers locally after remote build by querying remote metadata.
 
-- **Approach A (recommended):** generate containers locally in the cache after remote build by querying remote metadata and writing `.rusttests` locally.
-- **Approach B:** sync `.rusttests` files from remote into cache as part of sync rules.
+**Rationale:**
+- `.rusttests` files are small metadata files (~1KB)
+- They're derived from cargo output which we already capture during build
+- Avoids sync complexity and potential race conditions
+- Works identically for WSL and SSH modes
+- Test containers reference paths that must be VS-visible anyway
+
+**Implementation:**
+
+```csharp
+public async Task GenerateTestContainersAsync(
+    PathEx manifestPath,
+    IPathMapper pathMapper,
+    string profile,
+    CancellationToken ct)
+{
+    var workspace = await GetWorkspaceAsync(manifestPath, pathMapper, ct);
+
+    foreach (var package in workspace.Packages)
+    {
+        foreach (var (container, target) in package.GetTestContainers(profile))
+        {
+            // Container path is already in VS-visible format (UNC or local cache)
+            // because workspace was created through WorkspaceFactory with path mapping
+            await container.WriteTestContainerAsync(
+                package.ManifestPath,
+                workspace.TargetDirectory,
+                additionalTestDiscoveryArgs,
+                additionalTestExecutionArgs,
+                testExecutionEnv,
+                profile,
+                Array.Empty<PathEx>(),  // Test exes discovered later
+                ct);
+        }
+    }
+}
+```
 
 **Test Execution Updates:**
 
@@ -946,6 +1642,158 @@ public class RemotePathMiddleLayer : ILanguageClientMiddleLayer
 - **Mixed URIs**: rust-analyzer may return URIs for dependency sources (e.g., sysroot) outside the workspace; mapping rules must not break these.
 - **Windows drive-letter URIs** in local mode must remain unchanged.
 - **Performance**: deep-cloning every payload is expensive. Prefer in-place rewrite with careful token traversal and minimal allocations.
+
+#### LSP URI Fields Specification
+
+Instead of trying to detect URIs by parsing every string, use schema-aware rewriting based on the LSP specification. The following fields are known to contain document URIs:
+
+```csharp
+/// <summary>
+/// LSP fields known to contain URIs requiring rewriting.
+/// Based on LSP 3.17 specification.
+/// Key = JSON property path, Value = whether it's a single URI or array/object of URIs
+/// </summary>
+private static class LspUriFields
+{
+    // --- Outgoing (VS → rust-analyzer): Map local → remote ---
+
+    // textDocument/* requests
+    public const string TextDocumentUri = "textDocument.uri";
+
+    // Initialize request
+    public const string RootUri = "rootUri";
+    public const string WorkspaceFoldersUri = "workspaceFolders[*].uri";
+
+    // workspace/didChangeWatchedFiles
+    public const string ChangesUri = "changes[*].uri";
+
+    // --- Incoming (rust-analyzer → VS): Map remote → local ---
+
+    // textDocument/publishDiagnostics
+    public const string DiagnosticsUri = "uri";
+    public const string RelatedInfoUri = "diagnostics[*].relatedInformation[*].location.uri";
+
+    // Location/LocationLink responses (definition, references, etc.)
+    public const string LocationUri = "uri";
+    public const string TargetUri = "targetUri";
+    public const string OriginUri = "originSelectionRange";  // NOT a URI - range only!
+
+    // workspace/applyEdit
+    public const string DocumentChangesUri = "documentChanges[*].textDocument.uri";
+    public const string ChangesKeysUri = "changes";  // Keys are URIs in this object
+
+    // Code actions
+    public const string DataUri = "data";  // May contain URIs in rust-analyzer-specific payloads
+
+    /// <summary>
+    /// Check if a property name is known to contain URIs.
+    /// </summary>
+    public static bool IsUriProperty(string propertyName)
+    {
+        return propertyName switch
+        {
+            "uri" => true,
+            "targetUri" => true,
+            "rootUri" => true,
+            _ => false
+        };
+    }
+
+    /// <summary>
+    /// Check if a property name is known to be an object where KEYS are URIs.
+    /// </summary>
+    public static bool IsUriKeyedObject(string propertyName)
+    {
+        return propertyName == "changes";
+    }
+}
+```
+
+**Improved URI Rewriting Implementation:**
+
+```csharp
+private JToken RewriteUrisInToken(JToken token, bool toRemote)
+{
+    if (token == null) return null;
+
+    switch (token.Type)
+    {
+        case JTokenType.String:
+            var str = token.Value<string>();
+            // Only attempt to rewrite if it looks like a file URI
+            if (str != null && str.StartsWith("file:", StringComparison.OrdinalIgnoreCase))
+            {
+                try
+                {
+                    var uri = new Uri(str);
+                    var mapped = toRemote
+                        ? _pathMapper.MapUriToRemote(uri)
+                        : _pathMapper.MapUriToLocal(uri);
+                    return JToken.FromObject(mapped.ToString());
+                }
+                catch (UriFormatException)
+                {
+                    // Not a valid URI, return unchanged
+                }
+            }
+            return token;
+
+        case JTokenType.Object:
+            var obj = (JObject)token;
+            var result = new JObject();
+
+            foreach (var prop in obj.Properties())
+            {
+                if (LspUriFields.IsUriKeyedObject(prop.Name) && prop.Value is JObject keysObj)
+                {
+                    // Special case: object where keys are URIs (e.g., "changes")
+                    var newKeysObj = new JObject();
+                    foreach (var keyProp in keysObj.Properties())
+                    {
+                        var newKey = RewriteUriString(keyProp.Name, toRemote);
+                        newKeysObj[newKey] = RewriteUrisInToken(keyProp.Value, toRemote);
+                    }
+                    result[prop.Name] = newKeysObj;
+                }
+                else
+                {
+                    result[prop.Name] = RewriteUrisInToken(prop.Value, toRemote);
+                }
+            }
+            return result;
+
+        case JTokenType.Array:
+            var arr = new JArray();
+            foreach (var item in (JArray)token)
+            {
+                arr.Add(RewriteUrisInToken(item, toRemote));
+            }
+            return arr;
+
+        default:
+            return token;
+    }
+}
+
+private string RewriteUriString(string uriString, bool toRemote)
+{
+    if (!uriString.StartsWith("file:", StringComparison.OrdinalIgnoreCase))
+        return uriString;
+
+    try
+    {
+        var uri = new Uri(uriString);
+        var mapped = toRemote
+            ? _pathMapper.MapUriToRemote(uri)
+            : _pathMapper.MapUriToLocal(uri);
+        return mapped.ToString();
+    }
+    catch
+    {
+        return uriString;
+    }
+}
+```
 
 **Updated LanguageClient:**
 
@@ -1837,6 +2685,190 @@ public class WslIntegrationTests : IClassFixture<WslTestFixture>
 
 ---
 
+## Logging and Diagnostics
+
+All remote operations should provide clear logging for troubleshooting. Users will look at the `rust-analyzer.vs` Output Window pane when things go wrong.
+
+### Logging Standards
+
+```csharp
+public class WslExecutionContext : IExecutionContext
+{
+    private readonly ILogger _logger;
+    private readonly string _distroName;
+
+    public async Task<ProcessResult> ExecuteAsync(
+        string command,
+        IEnumerable<string> arguments,
+        RemotePath workingDirectory,
+        IDictionary<string, string> environment,
+        IProcessOutputSink outputSink,
+        CancellationToken ct)
+    {
+        var argString = string.Join(" ", arguments);
+
+        // Log command start with full details
+        _logger.WriteLine($"[WSL:{_distroName}] Executing: {command} {argString}");
+        _logger.WriteLine($"[WSL:{_distroName}] Working directory: {workingDirectory}");
+
+        if (environment?.Any() == true)
+        {
+            _logger.WriteLine($"[WSL:{_distroName}] Environment: {string.Join(", ", environment.Select(kv => $"{kv.Key}=***"))}");
+        }
+
+        var stopwatch = Stopwatch.StartNew();
+
+        // ... execution ...
+
+        stopwatch.Stop();
+
+        // Log completion with timing
+        _logger.WriteLine($"[WSL:{_distroName}] Completed in {stopwatch.ElapsedMilliseconds}ms, exit code: {result.ExitCode}");
+
+        // Log errors prominently
+        if (result.ExitCode != 0)
+        {
+            _logger.WriteError($"[WSL:{_distroName}] Command failed with exit code {result.ExitCode}");
+            foreach (var errLine in result.StandardError.Take(10))
+            {
+                _logger.WriteError($"[WSL:{_distroName}]   {errLine}");
+            }
+            if (result.StandardError.Count > 10)
+            {
+                _logger.WriteError($"[WSL:{_distroName}]   ... ({result.StandardError.Count - 10} more lines)");
+            }
+        }
+
+        return result;
+    }
+}
+```
+
+### Log Format Convention
+
+All remote-related log entries should follow this format:
+
+```
+[{TargetKind}:{TargetId}] {Message}
+```
+
+Examples:
+```
+[WSL:Ubuntu] Executing: cargo build --release
+[WSL:Ubuntu] Working directory: /home/user/myproject
+[WSL:Ubuntu] Completed in 4523ms, exit code: 0
+[SSH:devserver] Connection established
+[SSH:devserver] Uploading 3 changed files...
+[SSH:devserver] Executing: cargo test
+```
+
+### Diagnostic Commands
+
+Add diagnostic commands to the Tools menu for troubleshooting:
+
+```csharp
+[Command(PackageGuids.guidRustAnalyzerCmdSetString, PackageIds.IdDiagnoseRemoteTarget)]
+public sealed class DiagnoseRemoteTargetCommand : BaseRustAnalyzerCommand<DiagnoseRemoteTargetCommand>
+{
+    protected override async Task ExecuteCoreAsync(OleMenuCmdEventArgs e)
+    {
+        var targetService = GetService<ITargetSystemService>();
+        var target = targetService.CurrentTarget;
+        var ctx = target.GetExecutionContext();
+
+        var output = new StringBuilder();
+        output.AppendLine($"=== Remote Target Diagnostics ===");
+        output.AppendLine($"Target: {target.DisplayName} ({target.Kind})");
+        output.AppendLine();
+
+        // Test connectivity
+        output.AppendLine("Testing connectivity...");
+        try
+        {
+            var result = await ctx.ExecuteAndCaptureAsync(
+                "echo", new[] { "connection test" },
+                new RemotePath("/", target.Kind), CancellationToken.None);
+            output.AppendLine($"  ✓ Connection OK");
+        }
+        catch (Exception ex)
+        {
+            output.AppendLine($"  ✗ Connection failed: {ex.Message}");
+        }
+
+        // Check Rust toolchain
+        output.AppendLine("Checking Rust toolchain...");
+        try
+        {
+            var cargoVersion = await ctx.ExecuteAndCaptureAsync(
+                "cargo", new[] { "--version" },
+                new RemotePath("/", target.Kind), CancellationToken.None);
+            output.AppendLine($"  ✓ cargo: {cargoVersion.FirstOrDefault()}");
+
+            var rustcVersion = await ctx.ExecuteAndCaptureAsync(
+                "rustc", new[] { "--version" },
+                new RemotePath("/", target.Kind), CancellationToken.None);
+            output.AppendLine($"  ✓ rustc: {rustcVersion.FirstOrDefault()}");
+        }
+        catch (Exception ex)
+        {
+            output.AppendLine($"  ✗ Rust toolchain error: {ex.Message}");
+        }
+
+        // Check rust-analyzer
+        output.AppendLine("Checking rust-analyzer...");
+        try
+        {
+            var raPath = await ctx.GetRustAnalyzerPathAsync(CancellationToken.None);
+            output.AppendLine($"  ✓ rust-analyzer: {raPath}");
+        }
+        catch (Exception ex)
+        {
+            output.AppendLine($"  ✗ rust-analyzer not found: {ex.Message}");
+        }
+
+        // Show results
+        await VsCommon.ShowMessageBoxAsync("Remote Target Diagnostics", output.ToString());
+    }
+}
+```
+
+### Telemetry Events
+
+Track remote operations for diagnostics (without PII):
+
+```csharp
+public static class RemoteTelemetryEvents
+{
+    public static void TrackRemoteOperation(
+        ITelemetryService telemetry,
+        string operation,
+        TargetKind targetKind,
+        TimeSpan duration,
+        bool success,
+        string errorCategory = null)
+    {
+        telemetry.TrackEvent($"Remote.{operation}", new[]
+        {
+            ("TargetKind", targetKind.ToString()),
+            ("DurationMs", duration.TotalMilliseconds.ToString("F0")),
+            ("Success", success.ToString()),
+            ("ErrorCategory", errorCategory ?? "None")
+        });
+    }
+}
+
+// Usage:
+RemoteTelemetryEvents.TrackRemoteOperation(
+    _telemetry,
+    "Build",
+    TargetKind.Wsl,
+    stopwatch.Elapsed,
+    result.ExitCode == 0,
+    result.ExitCode != 0 ? "BuildFailed" : null);
+```
+
+---
+
 ## Appendix: File Changes Summary
 
 ### New Files
@@ -1889,6 +2921,28 @@ public class WslIntegrationTests : IClassFixture<WslTestFixture>
 
 ---
 
-*Document Version: 2.0*
-*Last Updated: December 2025*
+## Appendix: Design Decisions Summary
+
+This section summarizes all architectural decisions made in this document for quick reference.
+
+| Decision | Choice | Rationale |
+|----------|--------|-----------|
+| **Cargo DTO Strategy** | Raw DTO + Factory Pattern | Low risk; path mapping at single boundary; easy to test |
+| **Test Container Location** | Generate locally (Approach A) | Avoids sync complexity; works for both WSL and SSH |
+| **WSL Process Cancellation** | setsid + pkill | Prevents orphaned processes; clean process group management |
+| **LSP URI Rewriting** | Schema-aware field rewriting | More efficient than parsing every string; uses LSP spec knowledge |
+| **WSL Path Format** | Support both `\\wsl$\` and `\\wsl.localhost\` | Compatibility across Windows versions |
+| **Test Executable Discovery** | JSON-based (`--message-format=json`) | OS-neutral; stable cargo API; no regex fragility |
+| **Feature Flags** | Options page with VS restart | Safe rollout; clear user opt-in |
+| **SSH Approach** | Defer to spike (S1 preferred, S2 fallback) | Need to validate VS API availability first |
+
+---
+
+*Document Version: 3.0*
+*Last Updated: December 2024*
 *Status: Design Complete - Ready for Implementation*
+
+**Changelog:**
+- v3.0: Added concrete implementations for all outstanding decisions (Cargo DTO factory, test containers, process cancellation, LSP URI fields, MEF integration, feature flags, logging)
+- v2.0: Initial comprehensive plan with interface contracts and phased rollout
+- v1.0: Original design proposal
