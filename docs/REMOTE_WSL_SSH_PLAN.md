@@ -100,11 +100,16 @@ public PathEx WorkspaceRoot { get; set; }
 - When cargo runs in WSL, paths are Linux format.
 - Deserializing into `PathEx` corrupts them.
 
+**Critical design implication:** Any plan that runs `cargo metadata` (and/or consumes `cargo` JSON messages) on Linux/remote **cannot reuse the existing `Workspace` DTOs** as-is. We must either:
+
+- Introduce parallel DTOs that deserialize into `string`/`RemotePath`, and then map into VS-visible paths at the boundary, **or**
+- Make `Workspace` DTOs path-type-agnostic (high risk; touches a lot of code).
+
 ### Existing Remote Infrastructure (Untapped)
 
-- `ContentDefinition` already uses `CodeRemoteContentDefinition.CodeRemoteContentTypeName` as base.
-- `Microsoft.VisualStudio.Linux.ConnectionManager.Store` is referenced in project dependencies.
-- These may provide capabilities that can be leveraged.
+- `ContentDefinition` already uses `CodeRemoteContentDefinition.CodeRemoteContentTypeName` as a base definition.
+- **Important:** this does *not* automatically give us a remote filesystem or remote debugging. It only declares the content type can participate in “remote code” features if VS provides them.
+- **Do not assume** `Microsoft.VisualStudio.Linux.ConnectionManager` is available/usable for third-party extensions without validating with a spike.
 
 ---
 
@@ -125,6 +130,12 @@ public PathEx WorkspaceRoot { get; set; }
   - LSP locations/diagnostics (Go to definition, references, etc.)
   - Debug launch targets and source mapping
   - Test discovery and execution results
+
+### Non-Goals (Explicit)
+
+- Providing a full remote shell/terminal experience (out of scope for this extension).
+- Implementing a general-purpose remote filesystem provider unless VS exposes a supported public extension surface (otherwise use cache+sync).
+- Supporting remote Windows targets (this plan is Linux-first: WSL + SSH).
 
 ---
 
@@ -183,6 +194,8 @@ public readonly struct RemotePath : IEquatable<RemotePath>
         new RemotePath(string.Join("/", _path.Split('/').SkipLast(1)), Kind);
 }
 ```
+
+**Pitfall:** `RemotePath` must stay purely syntactic. Do not add `FileExists()`/`DirectoryExists()` helpers that “look like `PathExExtensions`”, or it will tempt callers to do host filesystem I/O against remote paths. Remote I/O must go through `IExecutionContext` (or through VS’s workspace/file APIs when available).
 
 ### `ITargetSystemService` (Per-Workspace)
 
@@ -400,6 +413,18 @@ public interface IProcessOutputSink
 
 WSL should be implemented first because VS already supports opening `\\wsl$` folders and the extension roadmap mentions WSL2.
 
+**Adjustment based on Visual Studio’s own WSL/SSH guidance:** Visual Studio has two broad ways to work with WSL:
+
+- **Native WSL filesystem access via UNC** (`\\wsl$\<distro>\...`) and local tooling (what this extension already leans on for “Open Folder”).
+- **WSL via SSH/Connection Manager** (more relevant for VS’s C++ Linux tooling and its Remote File Explorer).
+
+For this extension, prefer **native UNC + `wsl.exe` execution** for WSL support because it avoids SSH configuration entirely. However, if we choose to reuse Visual Studio’s Connection Manager for SSH features, we should explicitly document that users may encounter:
+
+- `localhost` port conflicts when connecting to WSL SSH (MS doc mentions port conflicts and workarounds)
+- WSL IP address changes requiring reconnects
+
+Reference: [Connect to your remote Linux system by using Visual Studio](https://learn.microsoft.com/en-us/cpp/linux/connect-to-your-remote-linux-computer?view=msvc-160).
+
 ### Phase W0 — Infrastructure Foundation (NEW)
 
 Before any WSL functionality, create the foundational abstractions.
@@ -416,6 +441,8 @@ Before any WSL functionality, create the foundational abstractions.
    - `EnableSshSupport` (default: false during development)
 
 **WslPathMapper Implementation:**
+
+> **Note:** The following is illustrative pseudo-code. Actual `file:` URI forms for UNC paths in VS can vary (authority vs `file:///` with escaped characters), so the implementation must be validated with a spike and unit tests capturing VS’s actual URIs.
 
 ```csharp
 public class WslPathMapper : IPathMapper
@@ -455,13 +482,12 @@ public class WslPathMapper : IPathMapper
         if (vsUri.Scheme != "file")
             return vsUri;
 
-        var localPath = vsUri.LocalPath;
-        if (localPath.StartsWith(_uncPrefix, StringComparison.OrdinalIgnoreCase))
-        {
-            var linuxPath = localPath.Substring(_uncPrefix.Length).Replace(@"\", "/");
-            return new Uri($"file://{linuxPath}");
-        }
-        return vsUri;
+        // PSEUDO:
+        // - Normalize VS UNC file URIs into a Windows UNC path (\\wsl$\Distro\...)
+        // - Map UNC path to Linux path (/...)
+        // - Emit a proper Unix absolute file URI: file:///home/user/...
+        // WARNING: Do not use "file://{path}" for Unix absolute paths; it introduces an authority component.
+        throw new NotImplementedException();
     }
 
     public Uri MapUriToLocal(Uri remoteUri)
@@ -469,13 +495,11 @@ public class WslPathMapper : IPathMapper
         if (remoteUri.Scheme != "file")
             return remoteUri;
 
-        var path = remoteUri.AbsolutePath;
-        if (path.StartsWith("/") && !path.StartsWith("//"))
-        {
-            var windowsPath = $"{_uncPrefix}{path.Replace("/", @"\")}";
-            return new Uri($"file:///{windowsPath}");
-        }
-        return remoteUri;
+        // PSEUDO:
+        // - Accept Unix absolute file URIs (file:///...)
+        // - Map Linux path (/...) to UNC (\\wsl$\Distro\...)
+        // - Emit a correct UNC file URI form understood by VS (likely file://wsl$/Distro/...)
+        throw new NotImplementedException();
     }
 
     public bool IsPathForTarget(string path)
@@ -485,6 +509,13 @@ public class WslPathMapper : IPathMapper
     }
 }
 ```
+
+**Additional WSL path variants to support:**
+
+- `\\wsl$\Distro\...`
+- `\\wsl.localhost\Distro\...` (seen on some systems)
+
+Add these to the test matrix up front.
 
 **Success Criteria:**
 - [ ] `RemotePath` type created with unit tests
@@ -504,6 +535,11 @@ public class WslPathMapper : IPathMapper
 - Parse distro name from path: `\\wsl$\{distroName}\...`
 
 **WslExecutionContext Implementation:**
+
+> **Important:** `wsl.exe --cd` is not universally available across all WSL versions. Plan for a compatibility fallback:
+>
+>- Preferred: `wsl.exe -d <distro> --cd <dir> -- <cmd> <args...>`
+>- Fallback: `wsl.exe -d <distro> -- sh -lc 'cd <dir> && <cmd> <args...>'` (requires careful quoting)
 
 ```csharp
 public class WslExecutionContext : IExecutionContext
@@ -596,6 +632,14 @@ public class WslExecutionContext : IExecutionContext
     }
 }
 ```
+
+**Pitfalls for WSL execution to address explicitly:**
+
+- **Cancellation**: killing `wsl.exe` does not always kill the remote child process tree. Decide whether to:
+  - tolerate orphaned processes, or
+  - track and explicitly kill remote PIDs (requires additional plumbing).
+- **Environment + quoting**: `env KEY=VALUE` needs escaping; values may contain spaces/quotes.
+- **Newlines/encoding**: ensure UTF-8 output handling matches current assumptions.
 
 **Diagnostics Path Mapping:**
 
@@ -732,6 +776,23 @@ public class TestDiscoverer : BaseTestDiscoverer, ITestDiscoverer
 }
 ```
 
+**Critical missing dependency in current codebase:** The existing test discovery path extraction logic and regexes are Windows-`.exe` oriented (e.g., parsing `Executable ... (..\.exe)` from cargo output). For WSL/SSH we must explicitly plan to:
+
+- Stop using Windows-only regexes for “test executable path” detection in remote mode.
+- Use `--message-format json` (or `cargo metadata`) for remote test executable discovery so it is OS-neutral.
+
+**Test container location (design decision required):**
+
+The extension currently writes `.rusttests` containers into the cargo target directory. For remote targets:
+
+- **WSL**: writing into the target directory on the UNC filesystem is acceptable (VS can read them).
+- **SSH cache mode (S2)**: remote build writes containers on the remote filesystem, but VS is reading from the local cache.
+
+Decide and document one approach:
+
+- **Approach A (recommended):** generate containers locally in the cache after remote build by querying remote metadata and writing `.rusttests` locally.
+- **Approach B:** sync `.rusttests` files from remote into cache as part of sync rules.
+
 **Test Execution Updates:**
 
 ```csharp
@@ -806,6 +867,8 @@ private static async Task RunTestsFromOneExe(
 
 **LSP Middle Layer Implementation:**
 
+> **Warning:** The example below is *not* correct as-is and should be treated as conceptual. LSP payloads contain URIs in more places than `"uri"` and `"targetUri"`, and some fields (e.g., `"originSelectionRange"`) are not URIs at all. The correct approach is to rewrite **string values that parse as `file:` URIs**, not rewrite based on property names alone.
+
 ```csharp
 public class RemotePathMiddleLayer : ILanguageClientMiddleLayer
 {
@@ -822,32 +885,7 @@ public class RemotePathMiddleLayer : ILanguageClientMiddleLayer
         return _methodsWithUris.Contains(methodName);
     }
 
-    private static readonly HashSet<string> _methodsWithUris = new()
-    {
-        // Outgoing (VS → RA) - need to convert local → remote
-        "textDocument/didOpen",
-        "textDocument/didChange",
-        "textDocument/didClose",
-        "textDocument/didSave",
-        "textDocument/completion",
-        "textDocument/hover",
-        "textDocument/definition",
-        "textDocument/typeDefinition",
-        "textDocument/implementation",
-        "textDocument/references",
-        "textDocument/documentHighlight",
-        "textDocument/documentSymbol",
-        "textDocument/codeAction",
-        "textDocument/codeLens",
-        "textDocument/formatting",
-        "textDocument/rangeFormatting",
-        "textDocument/rename",
-        "textDocument/signatureHelp",
-
-        // Incoming (RA → VS) - need to convert remote → local
-        "textDocument/publishDiagnostics",
-        "workspace/applyEdit",
-    };
+    // Better: allow all methods and rewrite any string token that is a file: URI.
 
     public async Task<JToken> HandleRequestAsync(
         string methodName,
@@ -883,21 +921,7 @@ public class RemotePathMiddleLayer : ILanguageClientMiddleLayer
                 var obj = (JObject)token.DeepClone();
                 foreach (var prop in obj.Properties().ToList())
                 {
-                    if (prop.Name == "uri" || prop.Name == "targetUri" || prop.Name == "originSelectionRange")
-                    {
-                        if (prop.Value.Type == JTokenType.String)
-                        {
-                            var uri = new Uri(prop.Value.ToString());
-                            var mappedUri = toRemote
-                                ? _pathMapper.MapUriToRemote(uri)
-                                : _pathMapper.MapUriToLocal(uri);
-                            prop.Value = mappedUri.ToString();
-                        }
-                    }
-                    else
-                    {
-                        prop.Value = RewriteUrisInToken(prop.Value, toRemote);
-                    }
+                    prop.Value = RewriteUrisInToken(prop.Value, toRemote);
                 }
                 return obj;
 
@@ -915,6 +939,13 @@ public class RemotePathMiddleLayer : ILanguageClientMiddleLayer
     }
 }
 ```
+
+**Additional LSP pitfalls to plan for:**
+
+- **Initialize payload** includes `rootUri` and/or `workspaceFolders` which must be mapped correctly for remote rust-analyzer.
+- **Mixed URIs**: rust-analyzer may return URIs for dependency sources (e.g., sysroot) outside the workspace; mapping rules must not break these.
+- **Windows drive-letter URIs** in local mode must remain unchanged.
+- **Performance**: deep-cloning every payload is expensive. Prefer in-place rewrite with careful token traversal and minimal allocations.
 
 **Updated LanguageClient:**
 
@@ -979,89 +1010,17 @@ Current debug code is Windows-native-only; WSL debug must use a different integr
 2. Start `gdbserver` inside WSL listening on a port or stdio
 3. Attach using VS's MIEngine debug adapter
 
-**Required Spikes (Before Implementation):**
+**Hard prerequisites and spikes (explicit):**
+
+- Users likely need the VS components that provide MIEngine (commonly through Linux/C++ workloads). Document this prereq up front and detect it if possible.
+- Run spikes before committing to any XML/options format:
 
 - [ ] Spike 1: Determine correct debug engine GUID for Linux/MI debugging in Open Folder contexts
 - [ ] Spike 2: Verify MIEngine configuration options for WSL
 - [ ] Spike 3: Test source mapping behavior with UNC paths
+- [ ] Spike 4: Validate WSL2 networking assumptions for gdbserver (localhost port forwarding vs explicit WSL IP)
 
-**Debug Launch Provider Updates:**
-
-```csharp
-[ExportLaunchDebugTarget(...)]
-public sealed class DebugLaunchTargetProvider : ILaunchDebugTargetProvider
-{
-    [Import]
-    public ITargetSystemService TargetSystemService { get; set; }
-
-    public void LaunchDebugTarget(
-        IWorkspace workspaceContext,
-        IServiceProvider serviceProvider,
-        DebugLaunchActionContext debugLaunchActionContext)
-    {
-        var target = TargetSystemService.CurrentTarget;
-
-        if (target.Kind == TargetKind.Local)
-        {
-            LaunchLocalDebugTarget(workspaceContext, serviceProvider, debugLaunchActionContext);
-        }
-        else if (target.Kind == TargetKind.Wsl)
-        {
-            LaunchWslDebugTarget(workspaceContext, serviceProvider, debugLaunchActionContext);
-        }
-    }
-
-    private void LaunchWslDebugTarget(
-        IWorkspace workspaceContext,
-        IServiceProvider serviceProvider,
-        DebugLaunchActionContext ctx)
-    {
-        var pathMapper = TargetSystemService.CurrentTarget.GetPathMapper();
-        var lcw = new LaunchConfigWrapper(ctx.LaunchConfiguration, _tl);
-
-        // Get the Linux path to the executable
-        var windowsExePath = (PathEx)lcw[LaunchConfigurationConstants.ProgramKey];
-        var linuxExePath = pathMapper.MapToRemote(windowsExePath);
-
-        var info = new VsDebugTargetInfo4
-        {
-            dlo = (uint)DEBUG_LAUNCH_OPERATION.DLO_CreateProcess,
-            bstrExe = (string)linuxExePath,
-            bstrCurDir = (string)linuxExePath.GetDirectoryName(),
-            bstrOptions = CreateMIDebuggerOptions(linuxExePath),
-            guidLaunchDebugEngine = MIDebugEngineGuid,  // Need to determine correct GUID
-            LaunchFlags = (uint)__VSDBGLAUNCHFLAGS.DBGLAUNCH_Silent,
-        };
-
-        // Configure source mapping
-        // Maps Linux paths back to UNC paths for VS
-        // ...
-
-        // Launch
-        VsShellUtilities.LaunchDebugger(serviceProvider, info);
-    }
-
-    private string CreateMIDebuggerOptions(RemotePath exePath)
-    {
-        // Create MI debugger options for WSL debugging
-        // This might involve:
-        // - Setting up gdbserver in WSL
-        // - Configuring source mappings
-        // - Setting working directory
-
-        return $@"
-            <LocalLaunchOptions xmlns=""http://schemas.microsoft.com/vstudio/MDDDebuggerOptions/2014""
-                MIDebuggerPath=""wsl.exe""
-                MIDebuggerArgs=""-d {_distroName} -- gdb""
-                ExePath=""{exePath}""
-                WorkingDirectory=""{exePath.GetDirectoryName()}"">
-                <SourceMap>
-                    <SourceMapEntry LocalPath=""{_uncPrefix}"" RemotePath=""/""/>
-                </SourceMap>
-            </LocalLaunchOptions>";
-    }
-}
-```
+**Important:** Avoid committing to a specific `VsDebugTargetInfo*` shape or MIEngine XML/options format in this plan. Those details must come from Spike 1–3 because VS debugging integration is extremely sensitive to exact contracts and often differs between “Open Folder” and “project-based” debugging.
 
 **Success Criteria:**
 - [ ] F5 starts debugging a WSL-built Rust binary
@@ -1088,6 +1047,45 @@ Before choosing between S1 and S2, investigate:
 2. **Does VS have a remote workspace filesystem provider API?**
    - Research VS extensibility for remote "Open Folder"
    - Check if `IVsHierarchy` can be implemented for remote files
+
+3. **Decide SSH implementation strategy (tooling):**
+   - Use built-in Windows OpenSSH (`ssh.exe`/`sftp.exe`) with non-interactive flows, **or**
+   - Use a managed SSH library (e.g., SSH.NET) for richer streaming and better control.
+
+4. **Evaluate reusing Visual Studio’s built-in “Connection Manager” instead of implementing SSH connection UX ourselves.**
+
+   Visual Studio has an existing SSH connection system for remote Linux development (and, historically, WSL via `localhost`), including:
+
+   - First-connect **host key fingerprint verification** and caching
+   - A supported set of SSH algorithms (older/insecure ones are rejected)
+   - Built-in logging to the “Cross Platform Logging” output pane and/or log files
+   - A command-line utility `ConnectionManager.exe` for scripting connection management
+
+   See Microsoft’s documentation: [Connect to your remote Linux system by using Visual Studio](https://learn.microsoft.com/en-us/cpp/linux/connect-to-your-remote-linux-computer?view=msvc-160).
+
+   **Design decision:** If we can safely integrate with Connection Manager (API or CLI), prefer it for:
+   - SSH profile storage + editing UX
+   - host key verification
+   - compatible cryptography defaults
+
+   If we cannot integrate, we must replicate key behaviors (host key verification, algorithm compatibility, logging).
+
+**Security requirements for SSH (must be in the plan):**
+
+- Host key verification (known_hosts) to prevent MITM
+- Secure storage for secrets:
+  - passwords/private keys should be stored using Windows secure storage (Credential Manager/DPAPI), **not** plain workspace settings
+- Avoid leaking secrets into logs/telemetry (sanitize command lines and env vars)
+
+**Compatibility requirements from real VS Connection Manager usage (practical constraints):**
+
+- **Key formats accepted by Visual Studio may be stricter than OpenSSH CLI tools.**
+  - Microsoft documents that `ssh-keygen -m pem` is required for keys accepted by VS in some cases, and that OpenSSH-format keys may be rejected by VS.
+  - VS 17.10+ removed DSA key support; RSA support varies by version (see MS doc).
+- **SSH algorithm negotiation failures can surface as misleading generic errors** (“Host name or Port incorrect”). Pinning server algorithms to VS-supported sets may be necessary in some environments.
+- **Login noise can break IDE probes.** Extra output like MOTD/mail banners may confuse remote probes; consider advising users to disable noisy PAM MOTD modules for the SSH server used by VS tooling.
+
+These constraints are corroborated by local notes from a WSL2 + SSH setup where VS accepted an ECDSA key in PEM format, rejected OpenSSH-format keys and PuTTY `.ppk`, and required algorithm pinning for successful negotiation.
 
 ### Option S1 — Integrate with VS-supported Remote Workspace Filesystem (Preferred if Supported)
 
@@ -1673,6 +1671,8 @@ public class WslPathMapperTests
 }
 ```
 
+**Add URI-form tests captured from real VS traffic.** Do not rely on hand-constructed URIs like `file:///\\\\wsl$\\...` until verified; VS may use `file://wsl$/Distro/...` or other variants.
+
 #### Cargo JSON Parsing Tests
 
 ```csharp
@@ -1825,6 +1825,11 @@ public class WslIntegrationTests : IClassFixture<WslTestFixture>
 | PathEx refactoring breaks existing local functionality | Medium | High | Create separate RemotePath type; don't modify PathEx; extensive regression testing |
 | VS remote filesystem API doesn't exist for extensions | Medium | High | Design SSH cache mode (S2) as fallback; spike early |
 | MIEngine WSL debugging doesn't work cleanly | Medium | Medium | Spike early in R3; consider alternative debug approaches |
+| Incorrect assumptions about file URI formats break LSP | Medium | High | Capture real VS↔LSP traffic; add a URI rewrite test matrix; avoid string-concat URIs |
+| Remote test discovery/execution breaks due to Windows-only parsing | High | High | Switch remote test discovery to JSON-based outputs; avoid `.exe` regex paths in remote mode |
+| SSH secrets mishandled | Low | High | Use secure storage; never log secrets; host key verification |
+| VS Connection Manager key/crypto constraints surprise users | Medium | Medium | Document accepted key formats (`-m pem`), host key verification, and supported algorithms; provide a troubleshooting guide and logging pointers |
+| TCP port forwarding restrictions break rsync/gdbserver when leaning on VS remote tooling | Medium | Medium | Prefer `sftp` fallback for copy; consider using `gdb` (not `gdbserver`) or require forwarding; document requirements clearly |
 | Performance issues with SSH sync | Medium | Medium | Incremental sync; lazy loading; caching; progress UI |
 | LSP latency makes IntelliSense unusable | Low | High | Request batching; local caching; timeout handling |
 | WSL distro detection fails on some systems | Low | Medium | Manual distro entry fallback; clear error messages |
@@ -1885,5 +1890,5 @@ public class WslIntegrationTests : IClassFixture<WslTestFixture>
 ---
 
 *Document Version: 2.0*
-*Last Updated: December 2024*
+*Last Updated: December 2025*
 *Status: Design Complete - Ready for Implementation*
