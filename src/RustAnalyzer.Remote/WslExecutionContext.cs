@@ -225,13 +225,14 @@ public sealed class WslExecutionContext : IExecutionContext
     {
         var raPath = await GetRustAnalyzerPathAsync(ct).ConfigureAwait(false);
 
-        // Build wsl.exe command for rust-analyzer
+        // Build command that sources cargo env and runs rust-analyzer
+        var command = $"[ -f ~/.cargo/env ] && . ~/.cargo/env; cd {EscapeForShell((string)workingDirectory)} && {EscapeForShell((string)raPath)}";
+
         var wslArgs = new[]
         {
             "-d", _distroName,
-            "--cd", (string)workingDirectory,
             "--",
-            (string)raPath,
+            "bash", "-c", command,
         };
 
         var psi = new ProcessStartInfo(WslExePath)
@@ -252,6 +253,7 @@ public sealed class WslExecutionContext : IExecutionContext
 
     /// <summary>
     /// Builds the wsl.exe argument array.
+    /// Uses a login shell to ensure ~/.cargo/bin is in PATH.
     /// </summary>
     private string[] BuildWslArguments(
         string command,
@@ -259,33 +261,47 @@ public sealed class WslExecutionContext : IExecutionContext
         RemotePath workingDirectory,
         IDictionary<string, string> environment)
     {
-        var args = new List<string>(16)
-        {
-            "-d", _distroName,
-            "--cd", (string)workingDirectory,
-            "--",
-        };
+        // Build the full command to execute
+        var cmdBuilder = new StringBuilder();
 
-        // Add environment variables as env command prefix if needed
+        // Source cargo environment if it exists (for rustup-installed cargo)
+        cmdBuilder.Append("[ -f ~/.cargo/env ] && . ~/.cargo/env; ");
+
+        // Add cd to working directory
+        cmdBuilder.Append($"cd {EscapeForShell((string)workingDirectory)} && ");
+
+        // Add environment variables
         if (environment != null && environment.Count > 0)
         {
-            args.Add("env");
             foreach (var kv in environment)
             {
-                // Escape values that contain special characters
                 var escapedValue = EscapeForShell(kv.Value);
-                args.Add($"{kv.Key}={escapedValue}");
+                cmdBuilder.Append($"{kv.Key}={escapedValue} ");
             }
         }
 
-        args.Add(command);
+        // Add the command
+        cmdBuilder.Append(command);
 
+        // Add arguments
         if (arguments != null)
         {
-            args.AddRange(arguments);
+            foreach (var arg in arguments)
+            {
+                cmdBuilder.Append(' ');
+                cmdBuilder.Append(EscapeForShell(arg));
+            }
         }
 
-        return args.ToArray();
+        var fullCommand = cmdBuilder.ToString();
+
+        // Run via bash -c to execute the full command
+        return new[]
+        {
+            "-d", _distroName,
+            "--",
+            "bash", "-c", fullCommand,
+        };
     }
 
     /// <summary>
