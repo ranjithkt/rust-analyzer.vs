@@ -33,8 +33,8 @@ This document provides a comprehensive overview of the rust-analyzer.vs Visual S
 | **Clippy/Fmt** | Rust linting and formatting integration |
 | **Debugging** | F5/Ctrl+F5 for native Windows debugging |
 | **Test Explorer** | Discover and run unit tests |
-| **WSL Support** | (In Progress) Build/debug in WSL |
-| **SSH Support** | (Planned) Remote Linux development |
+| **WSL Support** | (Preview) Target selection + WSL execution context/path mapping (Phase R0 complete); build/test/LSP/debug integration is Phase R1–R3 |
+| **SSH Support** | (Preview) Feature-flag plumbing only (TargetKind + Options). SSH execution + remote “Open Folder” workflow is Phase R4–R5 (approach chosen via spikes) |
 
 ### What This Extension Does NOT Do
 
@@ -56,9 +56,11 @@ This document provides a comprehensive overview of the rust-analyzer.vs Visual S
 ### Current Development Priorities
 
 1. ✅ Core functionality (Build, Debug, Test, LSP)
-2. 🔄 WSL2 remote development support
-3. ⏳ SSH remote development support
-4. ⏳ Cross-compilation workflows
+2. ✅ Remote foundation (Target system abstractions + WSL mapper/context + feature flags + Target System UI) — Phase R0 complete
+3. 🔄 WSL build/clean/fmt/clippy + diagnostics path mapping — Phase R1
+4. ⏳ WSL test adapter + rust-analyzer-in-WSL + URI rewriting + WSL debugging — Phase R1.5–R3
+5. ⏳ SSH remote (S0/S1/S2 decision + implementation) — Phase R4–R5
+6. ⏳ Cross-compilation workflows
 
 ---
 
@@ -255,6 +257,8 @@ Before merging each phase, measure against these targets:
 
 These decisions were made through extensive analysis of the codebase and discussion. They are **not negotiable** without revisiting the architectural foundations.
 
+**Status note (remote/WSL/SSH work)**: The repository currently contains the **Phase R0 foundation** (target system abstractions, path mapping, and execution contexts in `src/RustAnalyzer.Remote/*`, plus the Target System UI + feature flags). The downstream integrations (Build/Test/LSP/Debug) are phased work (R1+) and are **not fully wired yet**. This section documents both **implemented foundations** and **binding design commitments** for the remaining phases.
+
 ### Decision 1: Do NOT Modify PathEx
 
 **Problem**: `PathEx` normalizes all paths by converting `/` to `\`:
@@ -279,6 +283,8 @@ public PathEx(string path)
 **Problem**: Cargo metadata contains paths. When cargo runs in WSL/SSH, these are Linux paths. The existing `Workspace` DTO uses `PathEx`, which corrupts them.
 
 **Decision**: Use parallel "Raw" DTOs that deserialize to `string`, then convert via factory:
+
+**Implementation status**: ⏳ **Planned** (Phase R1). Current implementation still deserializes `cargo metadata` directly into `Workspace` (`src/RustAnalyzer.TestAdapter/Cargo/ToolchainService.cs:GetWorkspaceAsync()`), which assumes paths are safe to load into `PathEx`.
 
 ```csharp
 // Step 1: Deserialize to raw strings
@@ -314,6 +320,8 @@ public class WorkspaceFactory
 
 **Decision**: Generate containers locally after remote build by querying remote metadata.
 
+**Implementation status**: ⏳ **Planned** (Phase R1.5 / R4). Current behavior generates `.rusttests` locally for Windows builds and assumes Windows test executables. Remote workflows will adopt “Generate locally” for both WSL and SSH-cache scenarios.
+
 **Rationale**:
 - Container files are small (~1KB) metadata
 - They're derived from cargo output we already capture during build
@@ -326,6 +334,8 @@ public class WorkspaceFactory
 **Problem**: Killing `wsl.exe` does NOT reliably kill child processes inside WSL.
 
 **Decision**: Use `setsid --fork` to create process groups, then `pkill -g` for cleanup:
+
+**Implementation status**: ⏳ **Planned**. `src/RustAnalyzer.Remote/WslExecutionContext.cs` currently relies on cancelling the host `wsl.exe` process; it does **not yet** implement process-group creation (`setsid`) and group cleanup (`pkill`) described below.
 
 ```csharp
 // Start command in its own process group
@@ -367,6 +377,8 @@ void KillRemoteProcessGroup()
 **Problem**: The codebase had direct `ProcessRunner` calls, `cmd.exe` hardcoding, and Windows-specific assumptions scattered throughout.
 
 **Decision**: Route ALL process execution through `IExecutionContext`:
+
+**Implementation status**: ✅ **Interfaces + Local/WSL implementations exist** (Phase R0, `src/RustAnalyzer.Remote/*`). ⏳ **Repo-wide adoption is pending** (Phase R1+): `ToolchainService`, `LanguageClient`, `DebugLaunchTargetProvider`, and the Test Adapter still run locally via `ProcessRunner` today.
 
 ```csharp
 public interface IExecutionContext
@@ -414,6 +426,8 @@ public bool EnableWslSupport { get; set; } = false;
 
 **Decision**: Use schema-aware rewriting based on LSP specification:
 
+**Implementation status**: ⏳ **Planned** (Phase R2). Current `LanguageClient` returns `null` for `MiddleLayer` (`src/RustAnalyzer/LanguageService/LanguageClient.cs`), so no URI rewriting occurs yet.
+
 ```csharp
 // Known URI fields per LSP spec
 private static readonly HashSet<string> OutgoingUriFields = new()
@@ -440,6 +454,8 @@ private static readonly HashSet<string> IncomingUriFields = new()
 ### Decision 8: Target System Change = Full State Reset
 
 **Decision**: When user changes target system, perform complete state reset:
+
+**Implementation status**: ⏳ **Planned**. Target selection UI and `ITargetSystemService` exist (Phase R0), but nothing subscribes to `TargetChanged` yet, so changing the combo does not currently trigger the reset sequence below.
 
 ```csharp
 async Task OnTargetChangedAsync(TargetChangedEventArgs e)
@@ -492,11 +508,23 @@ src/
 │   └── Common/                      # Shared utilities (PathEx, ProcessRunner)
 │
 ├── RustAnalyzer.Remote/             # Remote target abstractions (NEW)
+│   ├── ExecutionCapabilities.cs     # Capability flags (build/test/LSP/debug/open-folder)
+│   ├── TargetKind.cs                # Local / Wsl / Ssh
+│   ├── RemotePath.cs                # Linux/remote path type (do not use PathEx)
 │   ├── IExecutionContext.cs         # Command execution abstraction
-│   ├── IPathMapper.cs               # Path translation abstraction
-│   ├── ITargetSystemService.cs      # Target management
-│   ├── WslExecutionContext.cs       # WSL implementation
-│   └── WslPathMapper.cs             # WSL path mapping
+│   ├── LocalExecutionContext.cs     # Local implementation (ProcessRunner wrapper)
+│   ├── WslExecutionContext.cs       # WSL implementation (wsl.exe transport)
+│   ├── IProcessOutputSink.cs        # Streaming output hook
+│   ├── ProcessResult.cs             # Exit code + captured output
+│   ├── IPathMapper.cs               # Path/URI translation abstraction
+│   ├── LocalPathMapper.cs           # Identity mapping (Windows local)
+│   ├── WslPathMapper.cs             # \\wsl$\ / \\wsl.localhost\ ↔ Linux path mapping
+│   ├── ITargetSystem.cs             # Target descriptor (id/display/kind + factories)
+│   ├── LocalTargetSystem.cs         # Local target
+│   ├── WslTargetSystem.cs           # WSL distro target
+│   ├── TargetChangedEventArgs.cs    # Target change event args
+│   ├── ITargetSystemService.cs      # Target management service contract
+│   └── TargetSystemService.cs       # WSL auto-detect + distro enumeration (SSH TODO)
 │
 ├── RustAnalyzer.UnitTests/          # Unit tests for main extension
 ├── RustAnalyzer.TestAdapter.UnitTests/
@@ -581,8 +609,8 @@ public sealed class ToolchainService : IToolchainService
 
 | Type | Purpose | Location |
 |------|---------|----------|
-| `PathEx` | Windows paths only, normalizes `/` to `\` | `TestAdapter/Common/PathEx.cs` |
-| `RemotePath` | Linux paths, preserves `/` | `Remote/RemotePath.cs` |
+| `PathEx` | Windows paths only, normalizes `/` to `\` | `src/RustAnalyzer.TestAdapter/Common/PathEx.cs` |
+| `RemotePath` | Linux/remote paths, preserves `/` | `src/RustAnalyzer.Remote/RemotePath.cs` |
 
 **CRITICAL**: Never use `PathEx` for Linux paths - it corrupts them by converting `/` to `\`.
 
@@ -591,18 +619,35 @@ public sealed class ToolchainService : IToolchainService
 ```csharp
 public interface IExecutionContext
 {
-    TargetKind Kind { get; }  // Local, Wsl, Ssh
+    TargetKind Kind { get; }                 // Local, Wsl, Ssh
+    ExecutionCapabilities Capabilities { get; }
 
     Task<ProcessResult> ExecuteAsync(
-        string command,              // "cargo"
-        IEnumerable<string> args,    // ["build", "--release"]
-        RemotePath workingDirectory, // "/home/user/project"
+        string command,                 // e.g. "cargo" (not "cargo.exe")
+        IEnumerable<string> arguments,  // e.g. ["build", "--release"]
+        RemotePath workingDirectory,    // target-native working directory
         IDictionary<string, string> environment,
-        IProcessOutputSink sink,
+        IProcessOutputSink outputSink,
+        CancellationToken ct);
+
+    Task<string[]> ExecuteAndCaptureAsync(
+        string command,
+        IEnumerable<string> arguments,
+        RemotePath workingDirectory,
+        CancellationToken ct);
+
+    Task<bool> FileExistsAsync(RemotePath path, CancellationToken ct);
+    Task<bool> DirectoryExistsAsync(RemotePath path, CancellationToken ct);
+    Task<string> ReadFileAsync(RemotePath path, CancellationToken ct);
+
+    Task<RemotePath> GetRustAnalyzerPathAsync(CancellationToken ct);
+    Task<(Stream Input, Stream Output)> StartRustAnalyzerAsync(
+        RemotePath workingDirectory,
         CancellationToken ct);
 
     // Platform-specific properties
     string CargoCommand { get; }      // "cargo" or "cargo.exe"
+    string RustupCommand { get; }     // "rustup" or "rustup.exe"
     string BinaryExtension { get; }   // "" or ".exe"
 }
 ```
@@ -610,8 +655,8 @@ public interface IExecutionContext
 | Implementation | Description |
 |----------------|-------------|
 | `LocalExecutionContext` | Runs commands directly via ProcessRunner |
-| `WslExecutionContext` | Runs commands via `wsl.exe -d <distro>` |
-| `SshExecutionContext` | (Planned) Runs commands via SSH |
+| `WslExecutionContext` | Runs commands via `wsl.exe -d <distro> --cd <dir> -- ...` |
+| `SshExecutionContext` | (Planned) Runs commands via SSH (exec + streaming + file ops) |
 
 ### Path Mappers
 
@@ -629,6 +674,9 @@ public interface IPathMapper
     // For LSP URI translation
     Uri MapUriToRemote(Uri vsUri);
     Uri MapUriToLocal(Uri remoteUri);
+
+    // Quick filter to see if a path belongs to this target kind
+    bool IsPathForTarget(string path);
 }
 ```
 
@@ -643,6 +691,7 @@ public interface ITargetSystemService
     event EventHandler<TargetChangedEventArgs> TargetChanged;
 
     Task SetCurrentTargetAsync(ITargetSystem target, CancellationToken ct);
+    Task RefreshAvailableTargetsAsync(CancellationToken ct);
     ITargetSystem DetectTargetForWorkspace(PathEx workspacePath);
 }
 ```
@@ -721,9 +770,11 @@ var args = await _settingsService.GetAsync(
 // Cargo JSON output is parsed line-by-line
 BuildMessage[] msgs = BuildJsonOutputParser.Parse(
     workspaceRoot,
-    pathMapper,  // For remote path translation
     jsonLine,
     _tl);
+
+// Note (remote targets): Phase R1 will extend this flow so Linux paths coming from
+// cargo JSON (WSL/SSH) are translated back into VS-visible paths via IPathMapper.
 
 // Messages reported to Error List
 foreach (var msg in msgs)
@@ -738,7 +789,7 @@ foreach (var msg in msgs)
 
 ### Overview
 
-Remote development support (WSL/SSH) is implemented as a **target system abstraction** that routes all execution through the appropriate context.
+Remote development support (WSL/SSH) is being implemented as a **target system abstraction**. **Phase R0 (foundation) is complete**; **Phase R1+** wires this abstraction into build/test/LSP/debug so all remote-aware paths and process execution flow through the selected target system.
 
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
@@ -765,12 +816,33 @@ Remote development support (WSL/SSH) is implemented as a **target system abstrac
                        <distro>
 ```
 
+### Current Status (as of Phase R0)
+
+**Implemented (Phase R0 ✅)**:
+- **Target system foundation**: `TargetKind`, `RemotePath`, `ExecutionCapabilities`, `ITargetSystem*` abstractions (`src/RustAnalyzer.Remote/*`).
+- **Execution contexts**: `LocalExecutionContext` + `WslExecutionContext` exist (`src/RustAnalyzer.Remote/*`).
+  - `WslExecutionContext` executes commands via `C:\Windows\System32\wsl.exe` and can locate/start `rust-analyzer` inside the selected distro (`GetRustAnalyzerPathAsync`, `StartRustAnalyzerAsync`).
+  - **Known limitations (R0)**: `WslExecutionContext` currently assumes `wsl.exe --cd` is available and does not yet implement the plan’s compatibility fallback (`sh -lc 'cd … && …'`) nor process-group cleanup (see Decision 4 / plan doc).
+- **Path mapping**: `WslPathMapper` handles both `\\wsl$\Distro\...` **and** `\\wsl.localhost\Distro\...` and provides URI mapping helpers.
+- **Feature flags + UI**:
+  - `Options.EnableWslSupport` / `Options.EnableSshSupport` (Tools → Options → “Remote Development (Preview)”).
+  - Target System dropdown commands implemented in `src/RustAnalyzer/Shell/TargetSystemCommands.cs` (drives `TargetSystemService`).
+- **Unit tests**: `src/RustAnalyzer.Remote.UnitTests/*` covers `RemotePath` and `WslPathMapper`.
+
+**Not yet integrated (Phase R1+ ⏳)**:
+- **Build/Clean/Fmt/Clippy**: `ToolchainService` still executes locally via `ProcessRunner` and Windows-specific tooling (`src/RustAnalyzer.TestAdapter/Cargo/*`).
+- **Cargo JSON path mapping**: `BuildJsonOutputParser` assumes Windows paths and uses `Path.Combine(workspaceRoot, file_name)` which will break for Linux paths (Phase R1 work).
+- **LSP**: `LanguageClient` still starts a local `rust-analyzer.exe` and `MiddleLayer` is `null` (no URI rewriting) (Phase R2 work).
+- **Debugging**: `DebugLaunchTargetProvider` is Windows-native only today (Phase R3 work, MIEngine/gdbserver spike required).
+- **SSH**: SSH profiles, `SshTargetSystem`, `SshExecutionContext`, and the SSH “Open Folder” workflow are not implemented yet (Phase R4/R5 work).
+- **Target-change reset**: the “full state reset on target switch” sequence is not wired into the running services yet.
+
 ### Implementation Phases
 
 | Phase | Scope | Status |
 |-------|-------|--------|
 | **R0** | Core abstractions (RemotePath, IExecutionContext, etc.) | ✅ Complete |
-| **R1** | WSL Build/Clean/Fmt/Clippy | ⏳ In Progress |
+| **R1** | WSL Build/Clean/Fmt/Clippy | ⏳ Pending |
 | **R1.5** | WSL Test Adapter | ⏳ Pending |
 | **R2** | WSL rust-analyzer + LSP URI rewriting | ⏳ Pending |
 | **R3** | WSL Debugging (MIEngine/gdbserver) | ⏳ Pending |
@@ -779,10 +851,35 @@ Remote development support (WSL/SSH) is implemented as a **target system abstrac
 
 ### Key Design Decisions
 
-1. **Don't modify `PathEx`** - Create `RemotePath` for Linux paths
-2. **Use Raw DTO + Factory pattern** for cargo metadata parsing
-3. **JSON-based test discovery** for remote (not Windows regex)
-4. **`IExecutionContext` for ALL command execution** - No direct ProcessRunner calls for remote
+1. **Don't modify `PathEx`** - Create `RemotePath` for Linux paths (implemented in R0)
+2. **Use Raw DTO + Factory pattern** for cargo metadata parsing (planned, Phase R1)
+3. **Generate test containers locally** for remote (planned, Phase R1.5 / R4)
+4. **`IExecutionContext` for ALL command execution** - No direct ProcessRunner calls for remote targets (foundation in R0; adoption in R1+)
+5. **SSH “Open Folder” model is chosen via spikes** (S0/S1/S2); always keep S2 (local cache + sync) as the feasible fallback
+
+### SSH Support: Three Approaches (S0 / S1 / S2)
+
+SSH has an additional complexity that WSL does not: **Visual Studio must be able to edit the remote files** in a way the rest of the extension can operate on. The plan therefore treats SSH as a 3-approach decision:
+
+- **S0 — Enable/extend VS Remote File Explorer “Open”** (best if possible, VS 2026-first)
+  - Leverage VS Connection Manager + Remote File Explorer UX.
+  - Requires spikes to verify whether “Open” can be enabled/extended for Rust workspaces.
+- **S1 — Integrate with a VS-supported remote workspace filesystem** (preferred if supported)
+  - If VS exposes a supported API for “remote Open Folder”, the extension can operate on a true remote workspace.
+- **S2 — Local cache + sync (SFTP)** (always feasible fallback)
+  - Provide “Open SSH Folder…” → download to `%LOCALAPPDATA%\rust-analyzer.vs\ssh-cache\...` → VS opens local cache.
+  - Build/LSP/debug run on the remote folder path; diagnostics and LSP URIs are mapped remote↔cache via an SSH path mapper.
+
+The current decision matrix and spike checklist lives in `docs/REMOTE_WSL_SSH_PLAN.md` (see “VS 2026 Remote Infrastructure Spike Plan” and “Spike Decision Matrix”).
+
+### Design References (Remote/WSL/SSH)
+
+- `docs/REMOTE_WSL_SSH_PLAN.md` — canonical phased plan (R0–R5), SSH approach matrix (S0/S1/S2), and spike checklist.
+- `docs/Opus 4.5 Chat.md` and `docs/GPT 5.2 Chat.md` — background discussion and plan-review notes (historical; the plan doc is the authoritative source).
+
+### Wiring Notes (Phase R1+)
+
+- `TargetSystemStore` (`src/RustAnalyzer/Shell/TargetSystemCommands.cs`) lazily creates the workspace `ITargetSystemService` via `GetService(workspaceRoot)`. Ensure a workspace-load path (or the first remote-aware operation) calls this so the Target System combo can enumerate WSL distros when the preview flag is enabled.
 
 ---
 
@@ -857,18 +954,16 @@ return (false, $"Cargo not found in WSL distro '{ctx.DistroName}'. " +
 
 ```
 Unit Tests (Fast, No External Dependencies)
-├── Path mapping tests (WslPathMapperTests)
-├── RemotePath struct tests (RemotePathTests)
-├── JSON parsing with remote paths (BuildJsonOutputParserRemoteTests)
-├── Configuration/settings tests
-└── Command argument building tests
+├── Remote foundation: RemotePathTests, WslPathMapperTests (RustAnalyzer.Remote.UnitTests)
+├── Cargo JSON parsing: BuildJsonOutputParserTests (RustAnalyzer.TestAdapter.UnitTests)
+├── Test adapter behavior: TestDiscovererTests, TestExecutorTests (RustAnalyzer.TestAdapter.UnitTests)
+└── Common utilities: PathExTests, ProcessExtensionTests, StringExtensionsTests (RustAnalyzer.TestAdapter.UnitTests)
 
-Integration Tests (Require WSL/Rust installed)
-├── Build in WSL → verify exit code and output
-├── Test discovery in WSL → verify test cases found
-├── LSP communication → verify IntelliSense works
-├── End-to-end workflow tests
-└── Performance benchmark tests (BenchmarkDotNet)
+Integration Tests (Require external dependencies) — Planned for Phases R1–R5
+├── WSL: Build in WSL → verify exit code + diagnostics mapping
+├── WSL: rust-analyzer in WSL → initialize + basic request/response
+├── WSL: debug spike coverage (MIEngine + source mapping)
+└── SSH (S2): sync correctness + latency + large repo behavior
 ```
 
 ### Benchmarking
@@ -1183,6 +1278,6 @@ These are known areas requiring extra caution:
 
 ---
 
-*Last Updated: December 2024*
-*Version: 2.0 - Expanded with Performance-First philosophy and Critical Design Decisions*
+*Last Updated: December 2025*
+*Version: 2.1 - Updated Remote/WSL/SSH architecture details and aligned statuses with Phase R0 implementation*
 
