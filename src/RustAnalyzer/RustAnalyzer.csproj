@@ -3,6 +3,7 @@
   <PropertyGroup>
     <VSToolsPath Condition="'$(VSToolsPath)' == ''">$(MSBuildExtensionsPath32)\Microsoft\VisualStudio\v$(VisualStudioVersion)</VSToolsPath>
     <LangVersion>latest</LangVersion>
+    <GenerateResourceUsePreserializedResources>true</GenerateResourceUsePreserializedResources>
   </PropertyGroup>
   <Import Project="$(MSBuildExtensionsPath)\$(MSBuildToolsVersion)\Microsoft.Common.props" Condition="Exists('$(MSBuildExtensionsPath)\$(MSBuildToolsVersion)\Microsoft.Common.props')" />
   <PropertyGroup>
@@ -120,9 +121,9 @@
     <Content Include="Resources\Rust.png">
       <IncludeInVSIX>true</IncludeInVSIX>
     </Content>
-    <Resource Include="Resources\FileIcons\rs.png" />
-    <Resource Include="Resources\FileIcons\lock.png" />
-    <Resource Include="Resources\FileIcons\toml.png" />
+    <EmbeddedResource Include="Resources\FileIcons\rs.png" />
+    <EmbeddedResource Include="Resources\FileIcons\lock.png" />
+    <EmbeddedResource Include="Resources\FileIcons\toml.png" />
     <None Include="source.extension.vsixmanifest">
       <SubType>Designer</SubType>
       <Generator>VsixManifestGenerator</Generator>
@@ -157,6 +158,9 @@
   </ItemGroup>
   <ItemGroup>
     <PackageReference Include="System.Collections.Immutable" Version="7.0.0" />
+    <PackageReference Include="System.Resources.Extensions" Version="8.0.0">
+      <IncludeAssets>all</IncludeAssets>
+    </PackageReference>
     <Reference Include="Microsoft.VisualBasic" />
     <PackageReference Include="System.ComponentModel.Composition" Version="9.0.0-preview.7.24405.7" />
     <PackageReference Include="Microsoft.VisualStudio.Threading" Version="17.11.20" />
