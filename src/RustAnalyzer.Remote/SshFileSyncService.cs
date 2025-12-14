@@ -57,55 +57,31 @@ public sealed class SshFileSyncService : ISshFileSyncService
             // First, ensure the remote directory exists
             await EnsureRemoteDirectoryAsync(remoteRoot, connectionInfo, ct).ConfigureAwait(false);
 
-            // Get list of files to sync
+            // Count files that would be synced (for reporting)
             var filesToSync = GetFilesToSync(localRoot).ToList();
-
-            if (filesToSync.Count == 0)
+            progress?.Report(new SyncProgress
             {
-                return SyncResult.Succeeded(0, 0, 0, stopwatch.Elapsed);
-            }
+                CurrentFile = "Syncing directory...",
+                FilesProcessed = 0,
+                TotalFiles = filesToSync.Count,
+                BytesTransferred = 0,
+            });
 
-            int filesSynced = 0;
-            int filesSkipped = 0;
-            long bytesTransferred = 0;
-
-            // Sync files in batches using scp
-            foreach (var localFile in filesToSync)
-            {
-                ct.ThrowIfCancellationRequested();
-
-                var relativePath = GetRelativePath(localRoot, localFile);
-                var remoteFile = new RemotePath($"{remoteRoot}/{relativePath.Replace(@"\", "/")}", TargetKind.Ssh);
-
-                progress?.Report(new SyncProgress
-                {
-                    CurrentFile = relativePath,
-                    FilesProcessed = filesSynced + filesSkipped,
-                    TotalFiles = filesToSync.Count,
-                    BytesTransferred = bytesTransferred,
-                });
-
-                // Ensure remote directory exists
-                var remoteDir = GetRemoteDirectory(remoteFile);
-                await EnsureRemoteDirectoryAsync(remoteDir, connectionInfo, ct).ConfigureAwait(false);
-
-                // Copy file using scp
-                var fileInfo = new FileInfo((string)localFile);
-                var success = await CopyFileToRemoteAsync(localFile, remoteFile, connectionInfo, ct).ConfigureAwait(false);
-
-                if (success)
-                {
-                    filesSynced++;
-                    bytesTransferred += fileInfo.Length;
-                }
-                else
-                {
-                    filesSkipped++;
-                }
-            }
+            // Use recursive scp to copy entire directory (much faster than file-by-file)
+            var success = await CopyDirectoryToRemoteAsync(localRoot, remoteRoot, connectionInfo, ct).ConfigureAwait(false);
 
             stopwatch.Stop();
-            return SyncResult.Succeeded(filesSynced, filesSkipped, bytesTransferred, stopwatch.Elapsed);
+
+            if (success)
+            {
+                // Calculate total bytes transferred
+                long bytesTransferred = filesToSync.Sum(f => new FileInfo((string)f).Length);
+                return SyncResult.Succeeded(filesToSync.Count, 0, bytesTransferred, stopwatch.Elapsed);
+            }
+            else
+            {
+                return SyncResult.Failed("Failed to sync directory to remote.");
+            }
         }
         catch (OperationCanceledException)
         {
@@ -505,5 +481,232 @@ public sealed class SshFileSyncService : ISshFileSyncService
         using var proc = ProcessRunner.Run("scp", scpArgs.ToArray(), workingDirectory: null, env: null, ct);
         var exitCode = await proc;
         return exitCode == 0;
+    }
+
+    /// <summary>
+    /// Copies an entire local directory to the remote using rsync (preferred) or scp -r (fallback).
+    /// Uses rsync for efficient incremental sync with proper excludes.
+    /// </summary>
+    private static async Task<bool> CopyDirectoryToRemoteAsync(
+        PathEx localDir,
+        RemotePath remoteDir,
+        SshConnectionInfo connectionInfo,
+        CancellationToken ct)
+    {
+        // Try rsync first (much more efficient, supports excludes, incremental)
+        if (await TryRsyncToRemoteAsync(localDir, remoteDir, connectionInfo, ct).ConfigureAwait(false))
+        {
+            return true;
+        }
+
+        // Fall back to scp -r
+        return await ScpDirectoryToRemoteAsync(localDir, remoteDir, connectionInfo, ct).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Tries to use rsync for efficient directory sync. Returns false if rsync is not available.
+    /// </summary>
+    private static async Task<bool> TryRsyncToRemoteAsync(
+        PathEx localDir,
+        RemotePath remoteDir,
+        SshConnectionInfo connectionInfo,
+        CancellationToken ct)
+    {
+        // Build rsync command
+        var rsyncArgs = new List<string>
+        {
+            "-avz",           // archive, verbose, compress
+            "--delete",       // delete files on remote that don't exist locally
+            "--progress",     // show progress
+        };
+
+        // Add excludes
+        foreach (var exclude in ExcludedNames)
+        {
+            rsyncArgs.Add($"--exclude={exclude}");
+        }
+
+        // Build SSH command for rsync
+        var sshCmd = new StringBuilder("ssh");
+        if (!string.IsNullOrEmpty(connectionInfo.IdentityFile))
+        {
+            sshCmd.Append($" -i \"{connectionInfo.IdentityFile}\"");
+        }
+
+        if (connectionInfo.Port != 22)
+        {
+            sshCmd.Append($" -p {connectionInfo.Port}");
+        }
+
+        sshCmd.Append(" -o StrictHostKeyChecking=accept-new -o BatchMode=yes");
+
+        rsyncArgs.Add("-e");
+        rsyncArgs.Add(sshCmd.ToString());
+
+        // Source - add trailing slash to copy contents, not directory itself
+        var localPath = (string)localDir;
+        if (!localPath.EndsWith("\\") && !localPath.EndsWith("/"))
+        {
+            localPath += "/";
+        }
+
+        // Convert Windows path to rsync-compatible format (for Git Bash rsync)
+        // C:\path\to\dir -> /c/path/to/dir
+        if (localPath.Length > 2 && localPath[1] == ':')
+        {
+            localPath = "/" + char.ToLower(localPath[0]) + localPath.Substring(2).Replace('\\', '/');
+        }
+
+        rsyncArgs.Add(localPath);
+
+        // Destination
+        var remoteDirStr = ConvertHomeForScp((string)remoteDir);
+        rsyncArgs.Add($"{connectionInfo.Username}@{connectionInfo.Host}:{remoteDirStr}/");
+
+        try
+        {
+            using var proc = ProcessRunner.Run("rsync", rsyncArgs.ToArray(), workingDirectory: null, env: null, ct);
+            var exitCode = await proc;
+            return exitCode == 0;
+        }
+        catch (System.ComponentModel.Win32Exception)
+        {
+            // rsync not found
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Copies directory using scp -r (fallback when rsync is not available).
+    /// </summary>
+    private static async Task<bool> ScpDirectoryToRemoteAsync(
+        PathEx localDir,
+        RemotePath remoteDir,
+        SshConnectionInfo connectionInfo,
+        CancellationToken ct)
+    {
+        var scpArgs = new List<string>();
+
+        // Add identity file if specified
+        if (!string.IsNullOrEmpty(connectionInfo.IdentityFile))
+        {
+            scpArgs.Add("-i");
+            scpArgs.Add(connectionInfo.IdentityFile);
+        }
+
+        // Add port if not default
+        if (connectionInfo.Port != 22)
+        {
+            scpArgs.Add("-P");
+            scpArgs.Add(connectionInfo.Port.ToString());
+        }
+
+        // Disable strict host key checking
+        scpArgs.Add("-o");
+        scpArgs.Add("StrictHostKeyChecking=accept-new");
+
+        // Batch mode
+        scpArgs.Add("-o");
+        scpArgs.Add("BatchMode=yes");
+
+        // Recursive copy
+        scpArgs.Add("-r");
+
+        // Quiet mode (reduces overhead)
+        scpArgs.Add("-q");
+
+        // Source - we need to sync contents, so use wildcard
+        // But first, let's get all top-level items that aren't excluded
+        var localPath = (string)localDir;
+        var itemsToSync = new List<string>();
+
+        foreach (var dir in Directory.GetDirectories(localPath))
+        {
+            var dirName = Path.GetFileName(dir);
+            if (!ExcludedNames.Contains(dirName))
+            {
+                itemsToSync.Add(dir);
+            }
+        }
+
+        foreach (var file in Directory.GetFiles(localPath))
+        {
+            itemsToSync.Add(file);
+        }
+
+        if (itemsToSync.Count == 0)
+        {
+            return true; // Nothing to sync
+        }
+
+        // For scp, we add all sources
+        scpArgs.AddRange(itemsToSync);
+
+        // Destination
+        var remoteDirStr = ConvertHomeForScp((string)remoteDir);
+        scpArgs.Add($"{connectionInfo.Username}@{connectionInfo.Host}:{remoteDirStr}/");
+
+        using var proc = ProcessRunner.Run("scp", scpArgs.ToArray(), workingDirectory: null, env: null, ct);
+        var exitCode = await proc;
+
+        if (exitCode != 0)
+        {
+            return false;
+        }
+
+        // Clean up excluded directories on remote (they might exist from previous syncs)
+        await CleanExcludedDirectoriesOnRemoteAsync(remoteDir, connectionInfo, ct).ConfigureAwait(false);
+
+        return true;
+    }
+
+    /// <summary>
+    /// Removes excluded directories on the remote if they exist.
+    /// </summary>
+    private static async Task CleanExcludedDirectoriesOnRemoteAsync(
+        RemotePath remoteDir,
+        SshConnectionInfo connectionInfo,
+        CancellationToken ct)
+    {
+        var sshArgs = new List<string>();
+
+        if (!string.IsNullOrEmpty(connectionInfo.IdentityFile))
+        {
+            sshArgs.Add("-i");
+            sshArgs.Add(connectionInfo.IdentityFile);
+        }
+
+        if (connectionInfo.Port != 22)
+        {
+            sshArgs.Add("-p");
+            sshArgs.Add(connectionInfo.Port.ToString());
+        }
+
+        sshArgs.Add("-o");
+        sshArgs.Add("StrictHostKeyChecking=accept-new");
+        sshArgs.Add("-o");
+        sshArgs.Add("BatchMode=yes");
+
+        sshArgs.Add($"{connectionInfo.Username}@{connectionInfo.Host}");
+
+        // Build command to remove excluded directories (ignore errors if they don't exist)
+        var remoteDirStr = (string)remoteDir;
+        var rmCommands = string.Join(" ; ", ExcludedNames
+            .Where(n => !n.Contains("*")) // Skip patterns with wildcards
+            .Select(n => remoteDirStr.Contains("$HOME")
+                ? $"rm -rf {remoteDirStr}/{n} 2>/dev/null"
+                : $"rm -rf \"{remoteDirStr}/{n}\" 2>/dev/null"));
+
+        sshArgs.Add(rmCommands);
+
+        try
+        {
+            using var proc = ProcessRunner.Run("ssh", sshArgs.ToArray(), workingDirectory: null, env: null, ct);
+            await proc; // Ignore exit code - directories might not exist
+        }
+        catch
+        {
+            // Ignore errors during cleanup
+        }
     }
 }
