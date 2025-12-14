@@ -173,7 +173,22 @@ public sealed class WslPathMapper : IPathMapper
         try
         {
             var localPath = MapToLocal(new RemotePath(linuxPath, TargetKind.Wsl));
-            return new Uri("file:///" + ((string)localPath).Replace('\\', '/'));
+
+            // For UNC paths like \\wsl$\Ubuntu\..., create a file URI using UriBuilder
+            // Note: The $ in wsl$ causes issues with standard URI parsing, so we use UriBuilder
+            // with an empty host and put the full path (including wsl$) in the Path property.
+            // This produces URIs like file:///wsl$/Ubuntu/home/user/...
+            // whose LocalPath is /wsl$/Ubuntu/home/user/...
+            string uncPath = (string)localPath;
+            if (uncPath.StartsWith(@"\\", StringComparison.Ordinal))
+            {
+                // Convert \\wsl$\Ubuntu\home\user to /wsl$/Ubuntu/home/user
+                string uriPath = "/" + uncPath.Substring(2).Replace('\\', '/');
+                var builder = new UriBuilder("file", string.Empty) { Path = uriPath };
+                return builder.Uri;
+            }
+
+            return new Uri("file:///" + uncPath.Replace('\\', '/'));
         }
         catch
         {

@@ -118,6 +118,8 @@ public sealed class ToolchainServiceTests
     [UseReporter(typeof(RaVsDiffReporter))]
     public async Task GetTestSuiteTestsAsync(string workspaceRelRoot, string containerName, string profile, string[] testExes)
     {
+        if (TestHelpers.ShouldSkipNightlyTest()) return;  // Requires nightly for --format json
+
         NamerFactory.AdditionalInformation = workspaceRelRoot.ReplaceInvalidChars();
         var workspacePath = TestHelpers.ThisTestRoot + (PathEx)workspaceRelRoot;
         var manifestPath = workspacePath + Constants.ManifestFileName2;

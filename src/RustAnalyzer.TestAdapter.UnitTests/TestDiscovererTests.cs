@@ -29,6 +29,8 @@ public class TestDiscovererTests : TestsWithLogger
     [UseReporter(typeof(RaVsDiffReporter))]
     public async Task DiscoverTestsTestsAsync(string workspaceRelRoot, string containerName, string profile)
     {
+        if (TestHelpers.ShouldSkipNightlyTest()) return;  // Requires nightly for --format json
+
         NamerFactory.AdditionalInformation = workspaceRelRoot.ReplaceInvalidChars();
         var tps = workspaceRelRoot.GetTestPaths(profile);
         var tcPath = tps.TargetPath + (PathEx)containerName;
@@ -48,6 +50,8 @@ public class TestDiscovererTests : TestsWithLogger
     [UseReporter(typeof(RaVsDiffReporter))]
     public async Task AdditionalBuildArgsTestsAsync(string workspaceRelRoot, string containerName, string profile)
     {
+        if (TestHelpers.ShouldSkipNightlyTest()) return;  // Requires nightly for --format json
+
         NamerFactory.AdditionalInformation = workspaceRelRoot.ReplaceInvalidChars();
         var tps = workspaceRelRoot.GetTestPaths(profile);
         var tcPath = tps.TargetPath + (PathEx)containerName;

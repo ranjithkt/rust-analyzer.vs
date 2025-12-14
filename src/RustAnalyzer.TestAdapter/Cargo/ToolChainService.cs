@@ -205,12 +205,15 @@ public sealed class ToolchainService : IToolchainService
     private async Task<TestSuiteInfo> GetTestSuiteInfoFromOneTestExeAsync(TestContainer container, PathEx testExePath, CancellationToken ct)
     {
         var workspaceRoot = container.TargetDir.GetDirectoryName();
+
+        // Note: --list --format json requires nightly Rust with -Zunstable-options
+        // This is tracked in https://github.com/rust-lang/rust/issues/49359
         using var proc = await ProcessRunner.RunWithLogging(workspaceRoot + testExePath, new[] { "--list", "--format", "json", "-Zunstable-options" }, workspaceRoot, ImmutableDictionary<string, string>.Empty, ct, _tl.L);
 
         var tests = Enumerable.Empty<TestSuiteInfo.TestInfo>();
         if (!proc.StandardOutputLines.FirstOrDefault()?.Trim()?.StartsWith("{") ?? false)
         {
-            _tl.L.WriteError($"{Vsix.Name} requires nightly toolchain. Please install the nightly toolchain following instructions in https://rust-lang.github.io/rustup/concepts/channels.html. Details: Fix for https://github.com/rust-lang/rust/issues/49359 is required to support unit testing experience. The RFC process is currently underway. Till then the fix is available only in nightly toolchain.");
+            _tl.L.WriteError($"{Vsix.Name} requires nightly toolchain for test discovery. Please install the nightly toolchain: rustup install nightly && rustup default nightly. See https://github.com/rust-lang/rust/issues/49359 for tracking.");
         }
         else
         {

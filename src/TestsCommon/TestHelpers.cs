@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Concurrent;
+using System.Diagnostics;
 using System.IO;
 using System.Reflection;
 using System.Text.RegularExpressions;
@@ -27,6 +28,65 @@ public static class TestHelpers
         };
 
     private static readonly ConcurrentDictionary<PathEx, IMetadataService> MetadataServices = new ConcurrentDictionary<PathEx, IMetadataService>();
+    private static bool? _isNightlyRust;
+
+    /// <summary>
+    /// Checks if the default Rust toolchain is nightly.
+    /// Tests that use --format json for test discovery/execution require nightly.
+    /// </summary>
+    public static bool IsNightlyRust
+    {
+        get
+        {
+            if (_isNightlyRust.HasValue)
+            {
+                return _isNightlyRust.Value;
+            }
+
+            try
+            {
+                using var proc = new Process
+                {
+                    StartInfo = new ProcessStartInfo
+                    {
+                        FileName = "rustc",
+                        Arguments = "--version",
+                        RedirectStandardOutput = true,
+                        UseShellExecute = false,
+                        CreateNoWindow = true,
+                    },
+                };
+                proc.Start();
+                var output = proc.StandardOutput.ReadToEnd();
+                proc.WaitForExit();
+                _isNightlyRust = output.Contains("nightly");
+            }
+            catch
+            {
+                _isNightlyRust = false;
+            }
+
+            return _isNightlyRust.Value;
+        }
+    }
+
+    /// <summary>
+    /// Returns true if nightly Rust is not available, indicating the test should be skipped.
+    /// Call this at the beginning of tests that require nightly Rust and return if true.
+    /// Example: if (TestHelpers.ShouldSkipNightlyTest(output)) return;
+    /// </summary>
+    /// <param name="output">Optional test output helper to log the skip reason.</param>
+    /// <returns>True if the test should be skipped (nightly not available).</returns>
+    public static bool ShouldSkipNightlyTest(Xunit.Abstractions.ITestOutputHelper output = null)
+    {
+        if (!IsNightlyRust)
+        {
+            output?.WriteLine("SKIPPED: This test requires nightly Rust. Install with: rustup install nightly && rustup default nightly");
+            return true;
+        }
+
+        return false;
+    }
 
     public static PathEx RemoveMachineSpecificPaths(this PathEx @this)
         => (PathEx)((string)@this).ToLowerInvariant().Replace(ThisTestRoot, "<TestRoot>");

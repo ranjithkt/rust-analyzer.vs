@@ -82,6 +82,8 @@ public class TestExecutor : BaseTestExecutor, ITestExecutor
             var envDict = trp.TestExecutionEnvironment.OverrideProcessEnvironment();
             var testCasesMap = testCases.ToImmutableDictionary(x => x.FullyQualifiedNameRustFormat());
             var args = testCases.Select(tc => tc.FullyQualifiedNameRustFormat());
+            // Note: --format json and --report-time require nightly Rust with -Zunstable-options
+            // This is tracked in https://github.com/rust-lang/rust/issues/49359
             var grps = args
                 .PartitionBasedOnMaxCombinedLength(20000)
                 .Select(x =>

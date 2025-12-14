@@ -31,6 +31,8 @@ public class TestExecutorTests : TestsWithLogger
     [UseReporter(typeof(RaVsDiffReporter))]
     public async Task RunTestsTestsAsync(string workspaceRelRoot, string containerName, string profile)
     {
+        if (TestHelpers.ShouldSkipNightlyTest()) return;  // Requires nightly for --format json
+
         NamerFactory.AdditionalInformation = workspaceRelRoot.ReplaceInvalidChars();
         var tps = workspaceRelRoot.GetTestPaths(profile);
         var tcPath = tps.TargetPath + (PathEx)containerName;
@@ -49,6 +51,8 @@ public class TestExecutorTests : TestsWithLogger
     [InlineData(@"workspace_with_tests", new[] { "add_one_libadd_one|add_one.tests.fibonacci_test.case_2", "adder_adder|adder.tests.it_works_failing", "adder_adder|adder.tests1.tests1.it_works_skipped2", "adder_adder|integration_tests.integration_test_1" }, "test")]
     public async Task RunSelectedTestsFromMultiplePackagesMultipleFilesTestsAsync(string workspaceRelRoot, string[] tests, string profile)
     {
+        if (TestHelpers.ShouldSkipNightlyTest()) return;  // Requires nightly for --format json
+
         NamerFactory.AdditionalInformation = workspaceRelRoot.ReplaceInvalidChars();
         var tps = workspaceRelRoot.GetTestPaths(profile);
 

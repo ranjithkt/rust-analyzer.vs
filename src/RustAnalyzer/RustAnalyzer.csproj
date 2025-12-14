@@ -107,11 +107,11 @@
   </ItemGroup>
   <ItemGroup>
     <Content Include="..\external\rust-analyzer.exe">
-      <Link>2025-06-09\rust-analyzer.exe</Link>
+      <Link>2025-12-08\rust-analyzer.exe</Link>
       <IncludeInVSIX>true</IncludeInVSIX>
     </Content>
     <Content Include="..\external\rust_analyzer.pdb">
-      <Link>2025-06-09\rust_analyzer.pdb</Link>
+      <Link>2025-12-08\rust_analyzer.pdb</Link>
       <IncludeInVSIX>true</IncludeInVSIX>
     </Content>
     <Content Include="languages.pkgdef">
