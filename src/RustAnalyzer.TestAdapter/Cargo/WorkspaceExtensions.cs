@@ -3,12 +3,16 @@ using System.IO;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
+using KS.RustAnalyzer.Remote;
 using KS.RustAnalyzer.TestAdapter.Common;
 
 namespace KS.RustAnalyzer.TestAdapter.Cargo;
 
 public static class WorkspaceExtensions
 {
+    /// <summary>
+    /// Crate type info for Windows targets.
+    /// </summary>
     public static readonly IReadOnlyDictionary<Workspace.CrateType, (string Prefix, string Extension)> CrateTypeInfos =
         new Dictionary<Workspace.CrateType, (string, string)>
         {
@@ -21,6 +25,29 @@ public static class WorkspaceExtensions
             [Workspace.CrateType.Bin] = (string.Empty, ".exe"),
         };
 
+    /// <summary>
+    /// Crate type info for Linux/remote targets (no .exe extension for binaries).
+    /// </summary>
+    public static readonly IReadOnlyDictionary<Workspace.CrateType, (string Prefix, string Extension)> CrateTypeInfosLinux =
+        new Dictionary<Workspace.CrateType, (string, string)>
+        {
+            [Workspace.CrateType.Lib] = ("lib", ".rlib"),
+            [Workspace.CrateType.RLib] = ("lib", ".rlib"),
+            [Workspace.CrateType.DyLib] = (string.Empty, ".so"),
+            [Workspace.CrateType.CdyLib] = (string.Empty, ".so"),
+            [Workspace.CrateType.StaticLib] = (string.Empty, ".a"),
+            [Workspace.CrateType.ProcMacro] = (string.Empty, ".so"),
+            [Workspace.CrateType.Bin] = (string.Empty, string.Empty), // No extension on Linux
+        };
+
+    /// <summary>
+    /// Gets the appropriate crate type info for the given target kind.
+    /// </summary>
+    public static IReadOnlyDictionary<Workspace.CrateType, (string Prefix, string Extension)> GetCrateTypeInfos(TargetKind kind)
+    {
+        return kind == TargetKind.Local ? CrateTypeInfos : CrateTypeInfosLinux;
+    }
+
     private static readonly IReadOnlyDictionary<string, PathEx> ProfileInfos = new Dictionary<string, PathEx>
     {
         ["dev"] = (PathEx)"debug",
@@ -31,11 +58,35 @@ public static class WorkspaceExtensions
 
     public static IEnumerable<Workspace.Target> GetTargets(this Workspace.Package @this) => @this.Targets;
 
+    /// <summary>
+    /// Creates the target filename for Windows (default) targets.
+    /// </summary>
     public static PathEx CreateTargetFileName(this Workspace.Target @this)
     {
-        return (PathEx)$"{CrateTypeInfos[@this.CrateTypes[0]].Prefix}{@this.Name}{CrateTypeInfos[@this.CrateTypes[0]].Extension}";
+        return CreateTargetFileName(@this, TargetKind.Local);
     }
 
+    /// <summary>
+    /// Creates the target filename for the specified target kind.
+    /// </summary>
+    public static PathEx CreateTargetFileName(this Workspace.Target @this, TargetKind targetKind)
+    {
+        var infos = GetCrateTypeInfos(targetKind);
+        return (PathEx)$"{infos[@this.CrateTypes[0]].Prefix}{@this.Name}{infos[@this.CrateTypes[0]].Extension}";
+    }
+
+    /// <summary>
+    /// Creates the target filename as a RemotePath for Linux targets.
+    /// </summary>
+    public static string CreateRemoteTargetFileName(this Workspace.Target @this)
+    {
+        var infos = CrateTypeInfosLinux;
+        return $"{infos[@this.CrateTypes[0]].Prefix}{@this.Name}{infos[@this.CrateTypes[0]].Extension}";
+    }
+
+    /// <summary>
+    /// Gets the path to the target binary for Windows (default) targets.
+    /// </summary>
     public static PathEx GetPath(this Workspace.Target @this, string profile)
     {
         var profileTargetPath = @this.Parent.Parent.TargetDirectory.MakeProfilePath(profile);
@@ -46,6 +97,40 @@ public static class WorkspaceExtensions
         else
         {
             return profileTargetPath + @this.TargetFileName;
+        }
+    }
+
+    /// <summary>
+    /// Gets the path to the target binary for a specific target kind.
+    /// </summary>
+    public static PathEx GetPath(this Workspace.Target @this, string profile, TargetKind targetKind)
+    {
+        var profileTargetPath = @this.Parent.Parent.TargetDirectory.MakeProfilePath(profile);
+        var targetFileName = @this.CreateTargetFileName(targetKind);
+        if (@this.Kinds[0] == Workspace.Kind.Example)
+        {
+            return profileTargetPath + (PathEx)"examples" + targetFileName;
+        }
+        else
+        {
+            return profileTargetPath + targetFileName;
+        }
+    }
+
+    /// <summary>
+    /// Gets the remote path to the target binary (for WSL/SSH targets).
+    /// </summary>
+    public static RemotePath GetRemotePath(this Workspace.Target @this, string profile, RemotePath remoteTargetDirectory)
+    {
+        var profilePath = profile == "dev" || profile == "test" ? "debug" : profile;
+        var targetFileName = @this.CreateRemoteTargetFileName();
+        if (@this.Kinds[0] == Workspace.Kind.Example)
+        {
+            return new RemotePath($"{remoteTargetDirectory}/{profilePath}/examples/{targetFileName}", TargetKind.Ssh);
+        }
+        else
+        {
+            return new RemotePath($"{remoteTargetDirectory}/{profilePath}/{targetFileName}", TargetKind.Ssh);
         }
     }
 

@@ -7,15 +7,20 @@ namespace KS.RustAnalyzer.Remote;
 /// Path mapper for SSH Local Sync mode (Mode 1).
 /// Maps between local Windows paths and remote Linux paths where files are synced.
 ///
-/// Example mapping:
-/// Local:  C:\Repos\my-project\src\main.rs
-/// Remote: /home/user/vs-sync/my-project/src/main.rs
+/// The remote structure preserves the local directory hierarchy relative to a common root,
+/// ensuring all relative paths in Cargo.toml files remain valid.
+///
+/// Example mapping (with common root C:\Repos\Rust):
+/// Local:  C:\Repos\Rust\trader-one\trader\src\main.rs
+/// Remote: $HOME/vs-sync/trader-one/trader/src/main.rs
 /// </summary>
 public sealed class LocalToRemoteSyncMapper : IPathMapper
 {
     private readonly PathEx _localRoot;
-    private readonly RemotePath _remoteRoot;
+    private readonly string _remoteSyncBase;
     private readonly SshConnectionInfo _connectionInfo;
+    private RemotePath _remoteRoot;
+    private string _commonLocalRoot;
 
     /// <summary>
     /// Creates a new local-to-remote sync mapper.
@@ -29,14 +34,56 @@ public sealed class LocalToRemoteSyncMapper : IPathMapper
         _localRoot = localRoot;
 
         // Replace ~ with $HOME so it expands properly even in quoted strings
-        var projectName = localRoot.GetFileName();
-        var expandedBasePath = remoteSyncBasePath.StartsWith("~/", StringComparison.Ordinal)
+        _remoteSyncBase = remoteSyncBasePath.StartsWith("~/", StringComparison.Ordinal)
             ? "$HOME" + remoteSyncBasePath.Substring(1)
             : remoteSyncBasePath.StartsWith("~", StringComparison.Ordinal)
                 ? "$HOME" + remoteSyncBasePath.Substring(1)
                 : remoteSyncBasePath;
 
-        _remoteRoot = new RemotePath($"{expandedBasePath}/{projectName}", TargetKind.Ssh);
+        // Default: use parent directory as common root to preserve structure
+        _commonLocalRoot = System.IO.Path.GetDirectoryName((string)localRoot) ?? (string)localRoot;
+        UpdateRemoteRoot();
+    }
+
+    /// <summary>
+    /// Gets the remote sync base path (e.g., $HOME/vs-sync).
+    /// </summary>
+    public string RemoteSyncBase => _remoteSyncBase;
+
+    /// <summary>
+    /// Gets the common local root for path mapping.
+    /// </summary>
+    public string CommonLocalRoot => _commonLocalRoot;
+
+    /// <summary>
+    /// Sets the common local root for all synced paths.
+    /// This should be called after discovering all dependencies to ensure correct path mapping.
+    /// </summary>
+    public void SetCommonLocalRoot(string commonRoot)
+    {
+        _commonLocalRoot = commonRoot;
+        UpdateRemoteRoot();
+    }
+
+    private void UpdateRemoteRoot()
+    {
+        var relativePath = GetRelativePathFromRoot(_commonLocalRoot, (string)_localRoot);
+        _remoteRoot = new RemotePath($"{_remoteSyncBase}/{relativePath}", TargetKind.Ssh);
+    }
+
+    private static string GetRelativePathFromRoot(string root, string targetPath)
+    {
+        var normalizedRoot = System.IO.Path.GetFullPath(root).TrimEnd('\\', '/');
+        var normalizedTarget = System.IO.Path.GetFullPath(targetPath).TrimEnd('\\', '/');
+
+        if (normalizedTarget.StartsWith(normalizedRoot, StringComparison.OrdinalIgnoreCase))
+        {
+            var relative = normalizedTarget.Substring(normalizedRoot.Length).TrimStart('\\', '/');
+            return relative.Replace('\\', '/');
+        }
+
+        // Fallback: just use the directory name
+        return System.IO.Path.GetFileName(normalizedTarget);
     }
 
     /// <inheritdoc/>
@@ -99,27 +146,57 @@ public sealed class LocalToRemoteSyncMapper : IPathMapper
 
         string path = (string)remotePath;
 
-        // Check if the path starts with our remote root
-        string remoteRootStr = (string)_remoteRoot;
-        if (path.StartsWith(remoteRootStr, StringComparison.Ordinal))
+        // Try to map using the remote sync base (handles all synced paths, not just main project)
+        // The remote sync base is $HOME/vs-sync, but cargo returns expanded paths like /root/vs-sync/...
+        var syncBaseSuffix = _remoteSyncBase.StartsWith("$HOME", StringComparison.Ordinal)
+            ? _remoteSyncBase.Substring(5)  // Get "/vs-sync" part after $HOME
+            : _remoteSyncBase;
+
+        // Check common home directory patterns for expanded sync base
+        string expandedSyncBase = null;
+
+        if (path.StartsWith("/root" + syncBaseSuffix, StringComparison.Ordinal))
         {
-            // Get the relative path from remote root
-            var relativePath = path.Substring(remoteRootStr.Length).TrimStart('/');
-
-            // Convert to Windows path format
-            var windowsRelativePath = relativePath.Replace("/", @"\");
-
-            // Combine with local root
-            if (string.IsNullOrEmpty(windowsRelativePath))
+            expandedSyncBase = "/root" + syncBaseSuffix;
+        }
+        else if (path.StartsWith("/home/", StringComparison.Ordinal))
+        {
+            // Handle /home/username/vs-sync/... pattern
+            var afterHome = path.Substring(6); // After "/home/"
+            var slashIndex = afterHome.IndexOf('/');
+            if (slashIndex > 0)
             {
-                return _localRoot;
+                var restOfPath = afterHome.Substring(slashIndex);
+                if (restOfPath.StartsWith(syncBaseSuffix, StringComparison.Ordinal))
+                {
+                    expandedSyncBase = "/home/" + afterHome.Substring(0, slashIndex) + syncBaseSuffix;
+                }
             }
-
-            return (PathEx)System.IO.Path.Combine((string)_localRoot, windowsRelativePath);
+        }
+        else if (path.StartsWith(_remoteSyncBase, StringComparison.Ordinal))
+        {
+            expandedSyncBase = _remoteSyncBase;
         }
 
-        // If it doesn't start with our remote root, we can't map it
-        throw new ArgumentException($"Path '{path}' is not within the remote sync root '{_remoteRoot}'");
+        if (expandedSyncBase != null)
+        {
+            // Get the path relative to the sync base
+            var pathAfterSyncBase = path.Substring(expandedSyncBase.Length).TrimStart('/');
+
+            // Convert to Windows path format
+            var windowsRelativePath = pathAfterSyncBase.Replace("/", @"\");
+
+            // Combine with common local root (not project root!)
+            if (string.IsNullOrEmpty(windowsRelativePath))
+            {
+                return (PathEx)_commonLocalRoot;
+            }
+
+            return (PathEx)System.IO.Path.Combine(_commonLocalRoot, windowsRelativePath);
+        }
+
+        // If it doesn't match any pattern, we can't map it
+        throw new ArgumentException($"Path '{path}' is not within the remote sync base '{_remoteSyncBase}' (expanded patterns checked: /root{syncBaseSuffix}, /home/*{syncBaseSuffix})");
     }
 
     /// <inheritdoc/>
@@ -168,20 +245,45 @@ public sealed class LocalToRemoteSyncMapper : IPathMapper
     /// <inheritdoc/>
     public bool IsPathForTarget(string path)
     {
-        // This mapper handles local Windows paths within our workspace root
+        // This mapper handles local Windows paths within our common local root
+        if (path.StartsWith(_commonLocalRoot, StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
+        // Also handles local paths within the workspace root
         if (path.StartsWith((string)_localRoot, StringComparison.OrdinalIgnoreCase))
         {
             return true;
         }
 
-        // Also handles remote paths within our sync root
-        if (path.StartsWith((string)_remoteRoot, StringComparison.Ordinal))
+        // Check for remote paths under the sync base
+        var syncBaseSuffix = _remoteSyncBase.StartsWith("$HOME", StringComparison.Ordinal)
+            ? _remoteSyncBase.Substring(5)  // Get "/vs-sync" part after $HOME
+            : _remoteSyncBase;
+
+        // Handle expanded home directory patterns
+        if (path.StartsWith("/root" + syncBaseSuffix, StringComparison.Ordinal))
         {
             return true;
         }
 
-        // Linux-style absolute paths are assumed to be remote
-        if (path.StartsWith("/", StringComparison.Ordinal))
+        if (path.StartsWith("/home/", StringComparison.Ordinal))
+        {
+            var afterHome = path.Substring(6);
+            var slashIndex = afterHome.IndexOf('/');
+            if (slashIndex > 0)
+            {
+                var restOfPath = afterHome.Substring(slashIndex);
+                if (restOfPath.StartsWith(syncBaseSuffix, StringComparison.Ordinal))
+                {
+                    return true;
+                }
+            }
+        }
+
+        // Handle $HOME prefix directly
+        if (path.StartsWith(_remoteSyncBase, StringComparison.Ordinal))
         {
             return true;
         }

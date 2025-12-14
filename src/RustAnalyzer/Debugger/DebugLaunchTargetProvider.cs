@@ -199,23 +199,45 @@ public sealed class DebugLaunchTargetProvider : ILaunchDebugTargetProvider
         L.WriteLine("[LaunchRemoteDebugTargetAsync] ENTRY - Kind: {0}, Profile: {1}", targetSystem.Kind, profile);
         T.TrackEvent("DebugRemote", ("Target", targetFQN), ("Profile", profile), ("TargetKind", targetSystem.Kind.ToString()));
 
-        // For WSL debugging, we need to use a different approach:
-        // Option 1: Launch gdbserver in WSL and connect MIEngine to it
-        // Option 2: Use VS's native WSL debugging support (VS 2022+)
+        // For remote targets, we need to compute the correct remote binary path
+        // The binary has no .exe extension on Linux
 
-        // For now, we'll show a message that remote debugging is in preview
-        // and provide the command to manually start gdbserver
+        RemotePath remoteProcessPath;
 
-        var processName = target.GetPath(profile);
-        L.WriteLine("[LaunchRemoteDebugTargetAsync] Local process path: {0}", processName);
+        // Check if we're in LocalSync mode (SSH with local source)
+        if (pathMapper is LocalToRemoteSyncMapper syncMapper)
+        {
+            // LocalSync mode: compute remote path directly using Linux naming
+            var remoteTargetDir = syncMapper.RemoteRoot.Combine("target");
+            remoteProcessPath = target.GetRemotePath(profile, remoteTargetDir);
+            L.WriteLine("[LaunchRemoteDebugTargetAsync] LocalSync mode - Remote process path: {0}", remoteProcessPath);
+        }
+        else
+        {
+            // Standard WSL/SSH mode: map the local path to remote
+            var processName = target.GetPath(profile, targetSystem.Kind);
+            L.WriteLine("[LaunchRemoteDebugTargetAsync] Local process path: {0}", processName);
+            remoteProcessPath = pathMapper.MapToRemote(processName);
+        }
 
-        var remoteProcessPath = pathMapper.MapToRemote((PathEx)processName);
         L.WriteLine("[LaunchRemoteDebugTargetAsync] Remote process path: {0}", remoteProcessPath);
 
         // Get the remote working directory
-        var remoteWorkingDir = workingDirectory.IsNullOrEmpty()
-            ? pathMapper.MapToRemote(((PathEx)processName).GetDirectoryName())
-            : pathMapper.MapToRemote((PathEx)workingDirectory);
+        RemotePath remoteWorkingDir;
+        if (!workingDirectory.IsNullOrEmpty())
+        {
+            remoteWorkingDir = pathMapper.MapToRemote((PathEx)workingDirectory);
+        }
+        else if (pathMapper is LocalToRemoteSyncMapper syncMapper2)
+        {
+            // LocalSync mode: use the sync root
+            remoteWorkingDir = syncMapper2.RemoteRoot;
+        }
+        else
+        {
+            // Standard mode: derive from the process path
+            remoteWorkingDir = remoteProcessPath.GetDirectoryName();
+        }
 
         if (targetSystem.Kind == TargetKind.Wsl)
         {

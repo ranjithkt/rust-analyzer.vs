@@ -1,4 +1,4 @@
-[0] = {
+﻿[0] = {
   "Code": "unused_imports",
   "ProjectFile": "D:\\src\\dpt\\pls\\test_app\\Cargo.toml",
   "Type": 1,
@@ -7,6 +7,6 @@
   "File": "d:\\src\\dpt\\pls\\test_app\\test_app\\src\\main.rs",
   "LineNumber": 2,
   "ColumnNumber": 5,
-  "SubCategory": null,
+  "SubCategory": "",
   "HelpKeyword": "unused_imports"
 }

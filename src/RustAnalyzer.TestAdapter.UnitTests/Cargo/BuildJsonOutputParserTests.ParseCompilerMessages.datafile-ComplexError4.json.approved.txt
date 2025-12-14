@@ -1,4 +1,4 @@
-[0] = {
+﻿[0] = {
   "Code": "RS0000",
   "ProjectFile": "D:\\src\\ks\\rust-analyzer\\src\\TestProjects\\hello_workspace\\shared\\Cargo.toml",
   "Type": 2,
@@ -7,6 +7,6 @@
   "File": "D:\\src\\ks\\rust-analyzer\\src\\TestProjects\\hello_workspace\\shared\\src\\lib.rs",
   "LineNumber": 1,
   "ColumnNumber": 1,
-  "SubCategory": null,
+  "SubCategory": "",
   "HelpKeyword": "RS0000"
 }

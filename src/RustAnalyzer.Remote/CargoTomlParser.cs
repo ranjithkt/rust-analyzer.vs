@@ -125,34 +125,21 @@ public static class CargoTomlParser
     }
 
     /// <summary>
-    /// Calculates the remote path for a dependency based on its relative path.
+    /// Calculates the remote path for a dependency by preserving the relative structure from the project.
+    /// This ensures all relative paths in Cargo.toml files remain valid on the remote.
     /// </summary>
     /// <param name="dependency">The dependency info.</param>
     /// <param name="projectRemoteRoot">The remote root where the project is synced (e.g., ~/vs-sync/trader).</param>
+    /// <param name="projectLocalRoot">The local root of the project (e.g., C:\Repos\trader-one\trader).</param>
     /// <returns>The remote path where this dependency should be placed.</returns>
-    public static RemotePath CalculateRemotePath(PathDependency dependency, RemotePath projectRemoteRoot)
+    public static RemotePath CalculateRemotePath(PathDependency dependency, RemotePath projectRemoteRoot, PathEx projectLocalRoot)
     {
-        // Parse the relative path to understand how many levels up we need to go
+        // Simply apply the same relative path transformation on the remote
+        // This preserves the directory structure so all relative paths remain valid
         var relativePath = dependency.RelativePath;
         var parts = relativePath.Split(new[] { '/', '\\' }, StringSplitOptions.RemoveEmptyEntries);
 
-        // Count ".." segments
-        int levelsUp = 0;
-        var remainingParts = new List<string>();
-
-        foreach (var part in parts)
-        {
-            if (part == "..")
-            {
-                levelsUp++;
-            }
-            else if (part != ".")
-            {
-                remainingParts.Add(part);
-            }
-        }
-
-        // Start from project remote root and go up
+        // Start from project remote root
         var remoteRootStr = (string)projectRemoteRoot;
         var remotePathParts = remoteRootStr.Split(new[] { '/' }, StringSplitOptions.RemoveEmptyEntries).ToList();
 
@@ -163,19 +150,34 @@ public static class CargoTomlParser
             remotePathParts.RemoveAt(0);
         }
 
-        // Go up the required number of levels
-        for (int i = 0; i < levelsUp && remotePathParts.Count > 0; i++)
+        // Apply the relative path: go up for ".." and add other components
+        foreach (var part in parts)
         {
-            remotePathParts.RemoveAt(remotePathParts.Count - 1);
+            if (part == "..")
+            {
+                if (remotePathParts.Count > 0)
+                {
+                    remotePathParts.RemoveAt(remotePathParts.Count - 1);
+                }
+            }
+            else if (part != ".")
+            {
+                remotePathParts.Add(part);
+            }
         }
-
-        // Add the remaining path parts
-        remotePathParts.AddRange(remainingParts);
 
         // Reconstruct the path
         var resultPath = (hasHomePrefix ? "$HOME/" : "/") + string.Join("/", remotePathParts);
 
         return new RemotePath(resultPath, TargetKind.Ssh);
+    }
+
+    /// <summary>
+    /// Legacy overload for backward compatibility.
+    /// </summary>
+    public static RemotePath CalculateRemotePath(PathDependency dependency, RemotePath projectRemoteRoot)
+    {
+        return CalculateRemotePath(dependency, projectRemoteRoot, default);
     }
 }
 

@@ -252,49 +252,72 @@ public sealed class SshFileSyncService : ISshFileSyncService
 
         try
         {
-            // First, sync the main project
-            var mainResult = await SyncToRemoteAsync(localRoot, remoteRoot, connectionInfo, progress, ct).ConfigureAwait(false);
-            if (!mainResult.Success)
-            {
-                return mainResult;
-            }
-
-            totalFilesSynced += mainResult.FilesSynced;
-            totalFilesSkipped += mainResult.FilesSkipped;
-            totalBytesTransferred += mainResult.BytesTransferred;
-            syncedPaths.Add((string)localRoot);
-
             // Find the Cargo.toml file
             var cargoTomlPath = localRoot + "Cargo.toml";
             if (!File.Exists((string)cargoTomlPath))
             {
-                // No Cargo.toml, just return the main project sync result
+                // No Cargo.toml, just sync the main project
+                var mainResult = await SyncToRemoteAsync(localRoot, remoteRoot, connectionInfo, progress, ct).ConfigureAwait(false);
                 stopwatch.Stop();
-                return SyncResult.Succeeded(totalFilesSynced, totalFilesSkipped, totalBytesTransferred, stopwatch.Elapsed);
+                return mainResult;
             }
 
             // Get all path dependencies recursively
             var dependencies = CargoTomlParser.GetAllPathDependenciesRecursive(cargoTomlPath);
 
-            if (dependencies.Count == 0)
+            // Collect all paths we need to sync (project + dependencies)
+            var allPaths = new List<string> { (string)localRoot };
+            allPaths.AddRange(dependencies.Select(d => (string)d.AbsoluteLocalPath));
+
+            // #region agent log H4: Dependencies found
+            try { System.IO.File.AppendAllText(@"c:\Repos3\rust-analyzer.vs\.cursor\debug.log", $"{{\"ts\":{DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()},\"loc\":\"SshFileSyncService:DepsFound\",\"hyp\":\"H4\",\"count\":{dependencies.Count},\"deps\":\"{string.Join(";", dependencies.Select(d => d.RelativePath))}\"}}\n"); } catch { }
+            // #endregion
+
+            // Find the common ancestor of all paths - this preserves relative path structure
+            var commonRoot = FindCommonAncestor(allPaths);
+
+            // #region agent log: Common root found
+            try { System.IO.File.AppendAllText(@"c:\Repos3\rust-analyzer.vs\.cursor\debug.log", $"{{\"ts\":{DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()},\"loc\":\"SshFileSyncService:CommonRoot\",\"hyp\":\"H1\",\"commonRoot\":\"{commonRoot.Replace("\\", "\\\\")}\"}}\n"); } catch { }
+            // #endregion
+
+            // Calculate remote sync base - use $HOME/vs-sync as base
+            var remoteBase = "$HOME/vs-sync";
+
+            // Sync the main project first
+            var projectRelativePath = GetRelativePathFromRoot(commonRoot, (string)localRoot);
+            var projectRemotePath = new RemotePath($"{remoteBase}/{projectRelativePath}", TargetKind.Ssh);
+
+            var mainSyncResult = await SyncToRemoteAsync(localRoot, projectRemotePath, connectionInfo, progress, ct).ConfigureAwait(false);
+            if (!mainSyncResult.Success)
             {
-                stopwatch.Stop();
-                return SyncResult.Succeeded(totalFilesSynced, totalFilesSkipped, totalBytesTransferred, stopwatch.Elapsed);
+                return mainSyncResult;
             }
 
-            // Sync each dependency
+            totalFilesSynced += mainSyncResult.FilesSynced;
+            totalFilesSkipped += mainSyncResult.FilesSkipped;
+            totalBytesTransferred += mainSyncResult.BytesTransferred;
+            syncedPaths.Add((string)localRoot);
+
+            // Sync each dependency, preserving the relative structure from common root
             foreach (var dependency in dependencies)
             {
                 ct.ThrowIfCancellationRequested();
 
+                var depLocalPath = (string)dependency.AbsoluteLocalPath;
+
                 // Skip if already synced
-                if (syncedPaths.Contains((string)dependency.AbsoluteLocalPath))
+                if (syncedPaths.Contains(depLocalPath))
                 {
                     continue;
                 }
 
-                // Calculate the remote path for this dependency
-                var depRemotePath = CargoTomlParser.CalculateRemotePath(dependency, remoteRoot);
+                // Calculate remote path by preserving structure relative to common root
+                var depRelativePath = GetRelativePathFromRoot(commonRoot, depLocalPath);
+                var depRemotePath = new RemotePath($"{remoteBase}/{depRelativePath}", TargetKind.Ssh);
+
+                // #region agent log: Syncing dependency
+                try { System.IO.File.AppendAllText(@"c:\Repos3\rust-analyzer.vs\.cursor\debug.log", $"{{\"ts\":{DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()},\"loc\":\"SshFileSyncService:SyncDep\",\"hyp\":\"H1\",\"local\":\"{depLocalPath.Replace("\\", "\\\\")}\",\"remote\":\"{depRemotePath}\"}}\n"); } catch { }
+                // #endregion
 
                 // Sync the dependency
                 var depResult = await SyncToRemoteAsync(
@@ -306,8 +329,6 @@ public sealed class SshFileSyncService : ISshFileSyncService
 
                 if (!depResult.Success)
                 {
-                    // Log warning but continue with other dependencies
-                    // A missing dependency will cause cargo build to fail anyway with a clear error
                     totalFilesSkipped++;
                     continue;
                 }
@@ -315,7 +336,7 @@ public sealed class SshFileSyncService : ISshFileSyncService
                 totalFilesSynced += depResult.FilesSynced;
                 totalFilesSkipped += depResult.FilesSkipped;
                 totalBytesTransferred += depResult.BytesTransferred;
-                syncedPaths.Add((string)dependency.AbsoluteLocalPath);
+                syncedPaths.Add(depLocalPath);
             }
 
             stopwatch.Stop();
@@ -329,6 +350,93 @@ public sealed class SshFileSyncService : ISshFileSyncService
         {
             return SyncResult.Failed($"Sync failed: {ex.Message}");
         }
+    }
+
+    /// <summary>
+    /// Finds the common ancestor directory of all given paths.
+    /// </summary>
+    private static string FindCommonAncestor(IList<string> paths)
+    {
+        if (paths == null || paths.Count == 0)
+        {
+            return string.Empty;
+        }
+
+        if (paths.Count == 1)
+        {
+            return Path.GetDirectoryName(paths[0]) ?? paths[0];
+        }
+
+        // Normalize all paths
+        var normalizedPaths = paths.Select(p => Path.GetFullPath(p).TrimEnd('\\', '/')).ToList();
+
+        // Split the first path into parts
+        var firstPath = normalizedPaths[0];
+        var commonParts = firstPath.Split(new[] { '\\', '/' }, StringSplitOptions.RemoveEmptyEntries).ToList();
+
+        // Compare with each other path
+        foreach (var path in normalizedPaths.Skip(1))
+        {
+            var parts = path.Split(new[] { '\\', '/' }, StringSplitOptions.RemoveEmptyEntries);
+
+            // Find how many parts match
+            int matchCount = 0;
+            for (int i = 0; i < Math.Min(commonParts.Count, parts.Length); i++)
+            {
+                if (string.Equals(commonParts[i], parts[i], StringComparison.OrdinalIgnoreCase))
+                {
+                    matchCount++;
+                }
+                else
+                {
+                    break;
+                }
+            }
+
+            // Trim common parts to the matching length
+            if (matchCount < commonParts.Count)
+            {
+                commonParts = commonParts.Take(matchCount).ToList();
+            }
+        }
+
+        // Reconstruct the common path
+        if (commonParts.Count == 0)
+        {
+            return string.Empty;
+        }
+
+        // Handle drive letter on Windows
+        var result = commonParts[0];
+        if (result.Length == 2 && result[1] == ':')
+        {
+            result += "\\";
+        }
+
+        for (int i = 1; i < commonParts.Count; i++)
+        {
+            result = Path.Combine(result, commonParts[i]);
+        }
+
+        return result;
+    }
+
+    /// <summary>
+    /// Gets the relative path from a root directory to a target path.
+    /// </summary>
+    private static string GetRelativePathFromRoot(string root, string targetPath)
+    {
+        var normalizedRoot = Path.GetFullPath(root).TrimEnd('\\', '/');
+        var normalizedTarget = Path.GetFullPath(targetPath).TrimEnd('\\', '/');
+
+        if (normalizedTarget.StartsWith(normalizedRoot, StringComparison.OrdinalIgnoreCase))
+        {
+            var relative = normalizedTarget.Substring(normalizedRoot.Length).TrimStart('\\', '/');
+            return relative.Replace('\\', '/');
+        }
+
+        // Fallback: just use the directory name
+        return Path.GetFileName(normalizedTarget);
     }
 
     private static IEnumerable<PathEx> GetFilesToSync(PathEx localRoot)
@@ -555,6 +663,10 @@ public sealed class SshFileSyncService : ISshFileSyncService
     {
         EnsureToolsChecked();
 
+        // #region agent log H2: Tool selection
+        try { System.IO.File.AppendAllText(@"c:\Repos3\rust-analyzer.vs\.cursor\debug.log", $"{{\"ts\":{DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()},\"loc\":\"SshFileSyncService:ToolCheck\",\"hyp\":\"H2\",\"rsync\":{_rsyncAvailable?.ToString().ToLower() ?? "null"},\"tar\":{_tarAvailable?.ToString().ToLower() ?? "null"},\"local\":\"{localDir}\",\"remote\":\"{remoteDir}\"}}\n"); } catch { }
+        // #endregion
+
         // Try rsync first (best - incremental, supports excludes, compressed)
         if (_rsyncAvailable == true)
         {
@@ -644,6 +756,10 @@ public sealed class SshFileSyncService : ISshFileSyncService
             // Use cmd.exe to run the piped command on Windows
             var cmdArgs = $"/c tar -czf -{excludeArgs} -C \"{localPath}\" . | {sshCmd} {remoteExtractCmd}";
 
+            // #region agent log H2-H3: tar+ssh command
+            try { System.IO.File.AppendAllText(@"c:\Repos3\rust-analyzer.vs\.cursor\debug.log", $"{{\"ts\":{DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()},\"loc\":\"SshFileSyncService:TarSshCmd\",\"hyp\":\"H2-H3\",\"local\":\"{localPath.Replace("\\", "\\\\")}\",\"remote\":\"{remoteDirStr}\"}}\n"); } catch { }
+            // #endregion
+
             Debug.WriteLine($"[SshFileSyncService] tar+ssh command: cmd.exe {cmdArgs}");
 
             var psi = new ProcessStartInfo
@@ -681,6 +797,10 @@ public sealed class SshFileSyncService : ISshFileSyncService
 
             var output = await outputTask.ConfigureAwait(false);
             var error = await errorTask.ConfigureAwait(false);
+
+            // #region agent log H2: tar+ssh result
+            try { var errSnip = error?.Length > 200 ? error.Substring(0, 200) : error ?? ""; System.IO.File.AppendAllText(@"c:\Repos3\rust-analyzer.vs\.cursor\debug.log", $"{{\"ts\":{DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()},\"loc\":\"SshFileSyncService:TarSshResult\",\"hyp\":\"H2\",\"exit\":{proc.ExitCode},\"err\":\"{errSnip.Replace("\\", "\\\\").Replace("\"", "\\\"").Replace("\n", " ").Replace("\r", "")}\"}}\n"); } catch { }
+            // #endregion
 
             if (proc.ExitCode != 0)
             {

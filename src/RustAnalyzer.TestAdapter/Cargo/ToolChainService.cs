@@ -61,13 +61,42 @@ public sealed class ToolchainService : IToolchainService
     {
         bool success;
 
+        // #region agent log H1-H5: Entry point instrumentation
+        try { System.IO.File.AppendAllText(@"c:\Repos3\rust-analyzer.vs\.cursor\debug.log", $"{{\"ts\":{DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()},\"loc\":\"ToolchainService:Entry\",\"hyp\":\"H1-H5\",\"kind\":\"{executionContext?.Kind}\",\"mapper\":\"{pathMapper?.GetType().Name}\",\"manifest\":\"{bti.ManifestPath}\"}}\n"); } catch { }
+        // #endregion
+
         if (executionContext != null && executionContext.Kind != TargetKind.Local)
         {
+            // #region agent log H5: Check if LocalSync mode
+            try { System.IO.File.AppendAllText(@"c:\Repos3\rust-analyzer.vs\.cursor\debug.log", $"{{\"ts\":{DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()},\"loc\":\"ToolchainService:RemoteCheck\",\"hyp\":\"H5\",\"isSsh\":{(executionContext.Kind == TargetKind.Ssh).ToString().ToLower()},\"isLocalSync\":{(pathMapper is LocalToRemoteSyncMapper).ToString().ToLower()}}}\n"); } catch { }
+            // #endregion
+
             // For SSH targets in LocalSync mode, sync files first
             if (executionContext.Kind == TargetKind.Ssh && pathMapper is LocalToRemoteSyncMapper syncMapper)
             {
                 _tl.L.WriteLine("[SSH] LocalSync mode detected. Syncing files to remote...");
                 bos.OutputSink?.Clear();
+
+                // Find dependencies and compute common root BEFORE syncing
+                var cargoTomlPath = syncMapper.LocalRoot + "Cargo.toml";
+                if (System.IO.File.Exists((string)cargoTomlPath))
+                {
+                    var dependencies = CargoTomlParser.GetAllPathDependenciesRecursive(cargoTomlPath);
+                    if (dependencies.Count > 0)
+                    {
+                        // Collect all paths and find common ancestor
+                        var allPaths = new System.Collections.Generic.List<string> { (string)syncMapper.LocalRoot };
+                        allPaths.AddRange(dependencies.Select(d => (string)d.AbsoluteLocalPath));
+                        var commonRoot = FindCommonAncestor(allPaths);
+
+                        // Update mapper to use the correct common root
+                        syncMapper.SetCommonLocalRoot(commonRoot);
+
+                        // #region agent log: Common root set
+                        try { System.IO.File.AppendAllText(@"c:\Repos3\rust-analyzer.vs\.cursor\debug.log", $"{{\"ts\":{DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()},\"loc\":\"ToolchainService:CommonRootSet\",\"hyp\":\"H1\",\"commonRoot\":\"{commonRoot.Replace("\\", "\\\\")}\",\"newRemoteRoot\":\"{syncMapper.RemoteRoot}\"}}\n"); } catch { }
+                        // #endregion
+                    }
+                }
 
                 // Create redirector to write sync status to output window
                 var syncRedirector = new BuildOutputRedirector(bos.OutputSink, bti.ManifestPath.GetDirectoryName(), null, null);
@@ -81,6 +110,10 @@ public sealed class ToolchainService : IToolchainService
                 syncRedirector.WriteLineWithoutProcessing($"  Note: Path dependencies from Cargo.toml will be synced automatically");
                 syncRedirector.WriteLineWithoutProcessing(string.Empty);
 
+                // #region agent log H1-H4: Before sync
+                try { System.IO.File.AppendAllText(@"c:\Repos3\rust-analyzer.vs\.cursor\debug.log", $"{{\"ts\":{DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()},\"loc\":\"ToolchainService:BeforeSync\",\"hyp\":\"H1-H4\",\"local\":\"{syncMapper.LocalRoot}\",\"remote\":\"{syncMapper.RemoteRoot}\",\"conn\":\"{syncMapper.ConnectionInfo.DisplayName}\"}}\n"); } catch { }
+                // #endregion
+
                 // Sync project AND all path dependencies from Cargo.toml
                 var syncResult = await _syncService.SyncProjectWithDependenciesAsync(
                     syncMapper.LocalRoot,
@@ -88,6 +121,10 @@ public sealed class ToolchainService : IToolchainService
                     syncMapper.ConnectionInfo,
                     progress: null,
                     ct).ConfigureAwait(false);
+
+                // #region agent log H1-H4: After sync
+                try { System.IO.File.AppendAllText(@"c:\Repos3\rust-analyzer.vs\.cursor\debug.log", $"{{\"ts\":{DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()},\"loc\":\"ToolchainService:AfterSync\",\"hyp\":\"H1-H4\",\"success\":{syncResult.Success.ToString().ToLower()},\"files\":{syncResult.FilesSynced},\"err\":\"{syncResult.ErrorMessage ?? ""}\"}}\n"); } catch { }
+                // #endregion
 
                 if (!syncResult.Success)
                 {
@@ -138,14 +175,48 @@ public sealed class ToolchainService : IToolchainService
                 ct: ct).ConfigureAwait(false);
         }
 
+        // #region agent log: Build result
+        try { System.IO.File.AppendAllText(@"c:\Repos3\rust-analyzer.vs\.cursor\debug.log", $"{{\"ts\":{DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()},\"loc\":\"ToolchainService:BuildResult\",\"hyp\":\"H6\",\"success\":{success.ToString().ToLower()}}}\n"); } catch { }
+        // #endregion
+
         if (success)
         {
-            var w = await GetWorkspaceAsync(bti.ManifestPath, executionContext, pathMapper, ct).ConfigureAwait(false);
-            var testContainers = w.Packages.SelectMany(p => p.GetTestContainers(bti.Profile));
-            w.TargetDirectory.MakeProfilePath(bti.Profile).CleanTestContainers(testContainers.Select(x => x.Container));
-            var tasks = testContainers
-                .Select(x => x.Container.WriteTestContainerAsync(x.Target.Parent.ManifestPath, w.TargetDirectory, bti.AdditionalTestDiscoveryArguments, bti.AdditionalTestExecutionArguments, bti.TestExecutionEnvironment, bti.Profile, Array.Empty<PathEx>(), ct));
-            await Task.WhenAll(tasks).ConfigureAwait(false);
+            // Skip test container setup for remote builds (LocalSync mode)
+            // The target directory is on the remote machine, not locally
+            if (executionContext != null && executionContext.Kind != TargetKind.Local && pathMapper is LocalToRemoteSyncMapper)
+            {
+                // #region agent log: Skip test containers for remote
+                try { System.IO.File.AppendAllText(@"c:\Repos3\rust-analyzer.vs\.cursor\debug.log", $"{{\"ts\":{DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()},\"loc\":\"ToolchainService:SkipTestContainers\",\"hyp\":\"H6\",\"reason\":\"LocalSync mode - target directory is remote\"}}\n"); } catch { }
+                // #endregion
+            }
+            else
+            {
+                try
+                {
+                    // #region agent log: GetWorkspace start
+                    try { System.IO.File.AppendAllText(@"c:\Repos3\rust-analyzer.vs\.cursor\debug.log", $"{{\"ts\":{DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()},\"loc\":\"ToolchainService:GetWorkspaceStart\",\"hyp\":\"H6\"}}\n"); } catch { }
+                    // #endregion
+
+                    var w = await GetWorkspaceAsync(bti.ManifestPath, executionContext, pathMapper, ct).ConfigureAwait(false);
+
+                    // #region agent log: GetWorkspace done
+                    try { System.IO.File.AppendAllText(@"c:\Repos3\rust-analyzer.vs\.cursor\debug.log", $"{{\"ts\":{DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()},\"loc\":\"ToolchainService:GetWorkspaceDone\",\"hyp\":\"H6\",\"packages\":{w?.Packages?.Count ?? 0}}}\n"); } catch { }
+                    // #endregion
+
+                    var testContainers = w.Packages.SelectMany(p => p.GetTestContainers(bti.Profile));
+                    w.TargetDirectory.MakeProfilePath(bti.Profile).CleanTestContainers(testContainers.Select(x => x.Container));
+                    var tasks = testContainers
+                        .Select(x => x.Container.WriteTestContainerAsync(x.Target.Parent.ManifestPath, w.TargetDirectory, bti.AdditionalTestDiscoveryArguments, bti.AdditionalTestExecutionArguments, bti.TestExecutionEnvironment, bti.Profile, Array.Empty<PathEx>(), ct));
+                    await Task.WhenAll(tasks).ConfigureAwait(false);
+                }
+                catch (Exception ex)
+                {
+                    // #region agent log: GetWorkspace failed
+                    try { System.IO.File.AppendAllText(@"c:\Repos3\rust-analyzer.vs\.cursor\debug.log", $"{{\"ts\":{DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()},\"loc\":\"ToolchainService:GetWorkspaceFailed\",\"hyp\":\"H6\",\"err\":\"{ex.Message.Replace("\\", "\\\\").Replace("\"", "\\\"")}\"}}\n"); } catch { }
+                    // #endregion
+                    throw;
+                }
+            }
         }
 
         return success;
@@ -274,11 +345,21 @@ public sealed class ToolchainService : IToolchainService
                 var args = new[] { "metadata", "--no-deps", "--format-version", "1", "--manifest-path", remoteManifestPath, "--offline" };
                 var remoteWorkingDir = pathMapper.MapToRemote(manifestPath.GetDirectoryName());
 
+                // #region agent log: cargo metadata call
+                try { System.IO.File.AppendAllText(@"c:\Repos3\rust-analyzer.vs\.cursor\debug.log", $"{{\"ts\":{DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()},\"loc\":\"ToolchainService:CargoMetadata\",\"hyp\":\"H6\",\"manifest\":\"{remoteManifestPath.Replace("$", "").Replace("\\", "\\\\")}\",\"workDir\":\"{remoteWorkingDir}\"}}\n"); } catch { }
+                // #endregion
+
                 var result = await executionContext.ExecuteAndCaptureAsync(
                     executionContext.CargoCommand,
                     args,
                     remoteWorkingDir,
                     ct).ConfigureAwait(false);
+
+                // #region agent log: cargo metadata result
+                var firstLine = result != null && result.Length > 0 ? result[0] : "";
+                var previewLen = Math.Min(100, firstLine.Length);
+                try { System.IO.File.AppendAllText(@"c:\Repos3\rust-analyzer.vs\.cursor\debug.log", $"{{\"ts\":{DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()},\"loc\":\"ToolchainService:CargoMetadataResult\",\"hyp\":\"H6\",\"lines\":{result?.Length ?? 0},\"preview\":\"{firstLine.Substring(0, previewLen).Replace("\\", "\\\\").Replace("\"", "\\\"")}\"}}\n"); } catch { }
+                // #endregion
 
                 var json = string.Join(string.Empty, result);
                 var rawWorkspace = JsonConvert.DeserializeObject<RawWorkspace>(json);
@@ -613,6 +694,10 @@ public sealed class ToolchainService : IToolchainService
             outputSink,
             ct).ConfigureAwait(false);
 
+        // #region agent log: Remote execution result
+        try { System.IO.File.AppendAllText(@"c:\Repos3\rust-analyzer.vs\.cursor\debug.log", $"{{\"ts\":{DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()},\"loc\":\"ToolchainService:RemoteExecResult\",\"hyp\":\"H7\",\"opName\":\"{opName}\",\"exitCode\":{result.ExitCode}}}\n"); } catch { }
+        // #endregion
+
         if (result.ExitCode == 0)
         {
             redirector.WriteLineWithoutProcessing("==== Build step: Finished ====\n");
@@ -628,6 +713,75 @@ public sealed class ToolchainService : IToolchainService
     /// <summary>
     /// Gets the remote manifest path from a VS-visible path.
     /// </summary>
+    /// <summary>
+    /// Finds the common ancestor directory of all given paths.
+    /// </summary>
+    private static string FindCommonAncestor(IList<string> paths)
+    {
+        if (paths == null || paths.Count == 0)
+        {
+            return string.Empty;
+        }
+
+        if (paths.Count == 1)
+        {
+            return Path.GetDirectoryName(paths[0]) ?? paths[0];
+        }
+
+        // Normalize all paths
+        var normalizedPaths = paths.Select(p => Path.GetFullPath(p).TrimEnd('\\', '/')).ToList();
+
+        // Split the first path into parts
+        var firstPath = normalizedPaths[0];
+        var commonParts = firstPath.Split(new[] { '\\', '/' }, StringSplitOptions.RemoveEmptyEntries).ToList();
+
+        // Compare with each other path
+        foreach (var path in normalizedPaths.Skip(1))
+        {
+            var parts = path.Split(new[] { '\\', '/' }, StringSplitOptions.RemoveEmptyEntries);
+
+            // Find how many parts match
+            int matchCount = 0;
+            for (int i = 0; i < Math.Min(commonParts.Count, parts.Length); i++)
+            {
+                if (string.Equals(commonParts[i], parts[i], StringComparison.OrdinalIgnoreCase))
+                {
+                    matchCount++;
+                }
+                else
+                {
+                    break;
+                }
+            }
+
+            // Trim common parts to the matching length
+            if (matchCount < commonParts.Count)
+            {
+                commonParts = commonParts.Take(matchCount).ToList();
+            }
+        }
+
+        // Reconstruct the common path
+        if (commonParts.Count == 0)
+        {
+            return string.Empty;
+        }
+
+        // Handle drive letter on Windows
+        var result = commonParts[0];
+        if (result.Length == 2 && result[1] == ':')
+        {
+            result += "\\";
+        }
+
+        for (int i = 1; i < commonParts.Count; i++)
+        {
+            result = Path.Combine(result, commonParts[i]);
+        }
+
+        return result;
+    }
+
     private static string GetRemoteManifestPath(PathEx manifestPath, IPathMapper pathMapper)
     {
         if (pathMapper == null || pathMapper.Kind == TargetKind.Local)

@@ -70,12 +70,22 @@ public sealed class SshExecutionContext : IExecutionContext
         // Build ssh arguments
         var sshArgs = BuildSshArguments(remoteCommand);
 
+        // Create a redirector to stream output to the sink in real-time
+        ProcessOutputRedirector redirector = outputSink != null
+            ? new OutputSinkRedirector(outputSink)
+            : null;
+
         using var proc = ProcessRunner.Run(
             "ssh",
             sshArgs,
             workingDirectory: null,
             env: null,
-            ct);
+            visible: false,
+            redirector: redirector,
+            quoteArgs: true,
+            outputEncoding: null,
+            errorEncoding: null,
+            cancellationToken: ct);
 
         outputSink?.OnProcessStarted(proc.ProcessId);
 
@@ -383,4 +393,37 @@ public sealed class SshConnectionInfo
     /// Gets a unique ID for this connection.
     /// </summary>
     public string Id => $"ssh:{DisplayName}";
+}
+
+/// <summary>
+/// Adapts an IProcessOutputSink to a ProcessOutputRedirector for real-time output streaming.
+/// </summary>
+internal sealed class OutputSinkRedirector : ProcessOutputRedirector
+{
+    private readonly IProcessOutputSink _sink;
+
+    public OutputSinkRedirector(IProcessOutputSink sink)
+    {
+        _sink = sink;
+    }
+
+    public override void WriteLine(string line)
+    {
+        _sink.OnStdout(line);
+    }
+
+    public override void WriteLineWithoutProcessing(string line)
+    {
+        _sink.OnStdout(line);
+    }
+
+    public override void WriteErrorLine(string line)
+    {
+        _sink.OnStderr(line);
+    }
+
+    public override void WriteErrorLineWithoutProcessing(string line)
+    {
+        _sink.OnStderr(line);
+    }
 }

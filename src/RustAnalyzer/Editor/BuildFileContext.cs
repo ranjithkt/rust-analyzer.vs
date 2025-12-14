@@ -83,7 +83,18 @@ public abstract class BuildFileContextBase : IBuildFileContext
         }
 
         await RlsUpdatedNotification.ShowAsync();
-        return await _commandFunc(BuildTargetInfo, bos, executionContext, pathMapper, cancellationToken);
+
+        // #region agent log
+        try { System.IO.File.AppendAllText(@"c:\Repos3\rust-analyzer.vs\.cursor\debug.log", $"{{\"ts\":{DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()},\"loc\":\"BuildFileContext:BeforeCommand\",\"hyp\":\"H5\"}}\n"); } catch { }
+        // #endregion
+
+        var result = await _commandFunc(BuildTargetInfo, bos, executionContext, pathMapper, cancellationToken);
+
+        // #region agent log
+        try { System.IO.File.AppendAllText(@"c:\Repos3\rust-analyzer.vs\.cursor\debug.log", $"{{\"ts\":{DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()},\"loc\":\"BuildFileContext:AfterCommand\",\"hyp\":\"H5\",\"result\":{result.ToString().ToLower()}}}\n"); } catch { }
+        // #endregion
+
+        return result;
     }
 
     /// <summary>

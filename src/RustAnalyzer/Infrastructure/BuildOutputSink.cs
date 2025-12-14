@@ -29,35 +29,56 @@ public sealed class BuildOutputSink : IBuildOutputSink
         {
             RustAnalyzerPackage.JTF.RunAsync(async () =>
             {
-                await RustAnalyzerPackage.JTF.SwitchToMainThreadAsync();
-                Initialize();
-                _buildOutputPane.Activate();
-
-                if (message is StringBuildMessage sm)
+                try
                 {
-                    if (string.IsNullOrEmpty(sm.Message))
-                    {
-                        return;
-                    }
+                    await RustAnalyzerPackage.JTF.SwitchToMainThreadAsync();
+                    Initialize();
+                    _buildOutputPane.Activate();
 
-                    foreach (var msg in SbmPreprocessor.Preprocess(rootPath, sm.Message))
+                    if (message is StringBuildMessage sm)
                     {
-                        var hr = _buildOutputPane.OutputStringThreadSafe(msg + Environment.NewLine);
-                        Ensure.That(ErrorHandler.Succeeded(hr));
+                        if (string.IsNullOrEmpty(sm.Message))
+                        {
+                            return;
+                        }
+
+                        foreach (var msg in SbmPreprocessor.Preprocess(rootPath, sm.Message))
+                        {
+                            var hr = _buildOutputPane.OutputStringThreadSafe(msg + Environment.NewLine);
+                            Ensure.That(ErrorHandler.Succeeded(hr));
+                        }
+                    }
+                    else if (message is DetailedBuildMessage bm)
+                    {
+                        // Report to Error List
+                        await buildOutputTaskReporter(bm);
+
+                        // Also output to Output Window with user-friendly format
+                        if (!string.IsNullOrEmpty(bm.LogMessage))
+                        {
+                            var hr = _buildOutputPane.OutputStringThreadSafe(bm.LogMessage + Environment.NewLine);
+                            Ensure.That(ErrorHandler.Succeeded(hr));
+                        }
+                    }
+                    else
+                    {
+                        throw new ArgumentOutOfRangeException(nameof(message));
                     }
                 }
-                else if (message is DetailedBuildMessage bm)
+                catch (Exception ex)
                 {
-                    await buildOutputTaskReporter(bm);
-                }
-                else
-                {
-                    throw new ArgumentOutOfRangeException(nameof(message));
+                    // #region agent log
+                    try { System.IO.File.AppendAllText(@"c:\Repos3\rust-analyzer.vs\.cursor\debug.log", $"{{\"ts\":{DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()},\"loc\":\"BuildOutputSink:WriteLineError\",\"hyp\":\"H5\",\"err\":\"{ex.GetType().Name}: {ex.Message.Replace("\\", "\\\\").Replace("\"", "\\\"").Replace("\r", "").Replace("\n", " ")}\"}}\n"); } catch { }
+                    // #endregion
+                    throw;
                 }
             }).FireAndForget();
         }
         catch (Exception e)
         {
+            // #region agent log
+            try { System.IO.File.AppendAllText(@"c:\Repos3\rust-analyzer.vs\.cursor\debug.log", $"{{\"ts\":{DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()},\"loc\":\"BuildOutputSink:WriteLineOuterError\",\"hyp\":\"H5\",\"err\":\"{e.GetType().Name}: {e.Message.Replace("\\", "\\\\").Replace("\"", "\\\"").Replace("\r", "").Replace("\n", " ")}\"}}\n"); } catch { }
+            // #endregion
             T.TrackException(e);
         }
     }

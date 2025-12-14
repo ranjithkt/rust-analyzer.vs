@@ -1,4 +1,4 @@
-[0] = {
+﻿[0] = {
   "Code": "RS0000",
   "ProjectFile": "D:\\src\\dpt\\pls\\test_app\\Cargo.toml",
   "Type": 2,
@@ -7,6 +7,6 @@
   "File": "D:\\src\\dpt\\pls\\test_app\\src\\main.rs",
   "LineNumber": 1,
   "ColumnNumber": 1,
-  "SubCategory": null,
+  "SubCategory": "",
   "HelpKeyword": "RS0000"
 }

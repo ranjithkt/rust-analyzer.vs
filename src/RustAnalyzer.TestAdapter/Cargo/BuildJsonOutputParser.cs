@@ -5,15 +5,16 @@ using System.Linq;
 using System.Text.RegularExpressions;
 using KS.RustAnalyzer.Remote;
 using KS.RustAnalyzer.TestAdapter.Common;
-using Newtonsoft.Json.Linq;
+using Newtonsoft.Json;
 using static KS.RustAnalyzer.TestAdapter.Common.DetailedBuildMessage;
 
 namespace KS.RustAnalyzer.TestAdapter.Cargo;
 
 /// <summary>
-/// References
-/// - https://doc.rust-lang.org/cargo/reference/external-tools.html#json-messages.
-/// - https://doc.rust-lang.org/rustc/json.html.
+/// Parses cargo JSON output (--message-format=json) into build messages.
+/// References:
+/// - https://doc.rust-lang.org/cargo/reference/external-tools.html#json-messages
+/// - https://doc.rust-lang.org/rustc/json.html
 /// </summary>
 public static class BuildJsonOutputParser
 {
@@ -35,6 +36,15 @@ public static class BuildJsonOutputParser
         new(@"^(.*)\+(.*)@(.*)$", RegexOptions.Compiled);
 
     /// <summary>
+    /// JSON serializer settings for cargo messages.
+    /// </summary>
+    private static readonly JsonSerializerSettings JsonSettings = new()
+    {
+        NullValueHandling = NullValueHandling.Ignore,
+        MissingMemberHandling = MissingMemberHandling.Ignore,
+    };
+
+    /// <summary>
     /// Parses a cargo JSON output line.
     /// </summary>
     /// <param name="workspaceRoot">The workspace root path (VS-visible).</param>
@@ -44,86 +54,172 @@ public static class BuildJsonOutputParser
     /// <returns>Parsed build messages.</returns>
     public static BuildMessage[] Parse(PathEx workspaceRoot, string jsonLine, TL tl, IPathMapper pathMapper = null)
     {
-        dynamic obj;
+        // First, determine the message type
+        CargoMessage baseMessage;
         try
         {
-            obj = JObject.Parse(jsonLine);
+            baseMessage = JsonConvert.DeserializeObject<CargoMessage>(jsonLine, JsonSettings);
         }
-        catch (Exception e)
+        catch (JsonException e)
         {
             tl.L.WriteLine("CargoJsonOutputParser failed to parse line: {0}. Exception {1}.", jsonLine, e);
-            tl.T.TrackException(e, new[] { ("Id", "JObjectParse"), ("Line", jsonLine) });
+            tl.T.TrackException(e, new[] { ("Id", "JsonParse"), ("Line", jsonLine) });
+            return new[] { new StringBuildMessage { Message = jsonLine } };
+        }
+
+        if (baseMessage?.Reason == null)
+        {
             return new[] { new StringBuildMessage { Message = jsonLine } };
         }
 
         try
         {
-            if (obj.reason == "compiler-artifact")
+            switch (baseMessage.Reason)
             {
-                return ParseCompilerArtifact(obj);
-            }
-            else if (obj.reason == "compiler-message")
-            {
-                return ParseCompilerMessage(workspaceRoot, obj, pathMapper);
+                case "compiler-artifact":
+                    var artifact = JsonConvert.DeserializeObject<CargoCompilerArtifact>(jsonLine, JsonSettings);
+                    return ParseCompilerArtifact(artifact);
+
+                case "compiler-message":
+                    var compilerMsg = JsonConvert.DeserializeObject<CargoCompilerMessage>(jsonLine, JsonSettings);
+                    return ParseCompilerMessage(workspaceRoot, compilerMsg, pathMapper);
+
+                case "build-finished":
+                    // Ignore build-finished messages
+                    return Array.Empty<BuildMessage>();
+
+                case "build-script-executed":
+                    // Ignore build-script-executed messages
+                    return Array.Empty<BuildMessage>();
+
+                default:
+                    // Unknown message type - ignore
+                    return Array.Empty<BuildMessage>();
             }
         }
         catch (Exception e)
         {
-            tl.L.WriteLine("CargoJsonOutputParser failed to parse line: {0}. Exception {1}.", jsonLine, e);
-            tl.T.TrackException(e, new[] { ("Id", "ParseCompilerX"), ("Line", jsonLine) });
+            tl.L.WriteLine("CargoJsonOutputParser failed to process message: {0}. Exception {1}.", jsonLine, e);
+            tl.T.TrackException(e, new[] { ("Id", "ProcessMessage"), ("Line", jsonLine) });
             return new[] { new StringBuildMessage { Message = jsonLine } };
         }
-
-        return Array.Empty<BuildMessage>();
     }
 
-    private static BuildMessage[] ParseCompilerMessage(PathEx workspaceRoot, dynamic obj, IPathMapper pathMapper)
+    /// <summary>
+    /// Parses a compiler message into build messages.
+    /// </summary>
+    private static BuildMessage[] ParseCompilerMessage(PathEx workspaceRoot, CargoCompilerMessage msg, IPathMapper pathMapper)
     {
-        if (obj.message.spans == null || obj.message.spans.Count == 0)
+        if (msg?.Message == null)
         {
-            return new BuildMessage[] { CreateBuildMessage(workspaceRoot, obj, pathMapper) };
+            return Array.Empty<BuildMessage>();
         }
 
-        return (obj.message.spans as IEnumerable<dynamic>).Select(
-            s =>
-            {
-                DetailedBuildMessage msg = CreateBuildMessage(workspaceRoot, obj, pathMapper, s.file_name, s.line_start, s.column_start);
-                return msg;
-            }).ToArray();
-    }
+        var diagnostic = msg.Message;
+        var spans = diagnostic.Spans;
 
-    private static int GetIntValue(dynamic obj, int defaultValue = default)
-    {
-        var value = 0;
-        return obj != null && obj.Value != null && int.TryParse(obj.Value.ToString(), out value)
-            ? value
-            : defaultValue;
-    }
-
-    private static DetailedBuildMessage CreateBuildMessage(PathEx workspaceRoot, dynamic obj, IPathMapper pathMapper, dynamic fileInfo = null, dynamic lineInfo = null, dynamic colInfo = null)
-    {
-        var msg = new DetailedBuildMessage
+        // If no spans, create a single message using the target source path
+        if (spans == null || spans.Count == 0)
         {
-            Code = GetMessageCode(obj.message),
-            ColumnNumber = GetIntValue(colInfo, 1),
-            File = obj.target.src_path.Value,
-            HelpKeyword = GetMessageCode(obj.message),
-            LineNumber = GetIntValue(lineInfo, 1),
-            ProjectFile = GetProjectFile(obj, pathMapper),
-            SubCategory = null,
-            TaskText = obj.message.message.Value,
-            Type = GetMessageType(obj.message.level.Value),
+            var singleMsg = CreateBuildMessage(workspaceRoot, msg, pathMapper, null);
+            return new BuildMessage[] { singleMsg };
+        }
+
+        // Create a message for each span
+        var messages = new List<BuildMessage>();
+        bool firstMessage = true;
+
+        foreach (var span in spans)
+        {
+            var buildMsg = CreateBuildMessage(workspaceRoot, msg, pathMapper, span);
+
+            // Only include the full LogMessage on the FIRST message to avoid duplicates in Output Window
+            // All messages go to Error List for navigation, but only one shows in Output Window
+            // NOTE: Use empty string instead of null - null strings crash VS's native OutputStringThreadSafe
+            if (!firstMessage)
+            {
+                buildMsg.LogMessage = string.Empty;
+            }
+            firstMessage = false;
+
+            messages.Add(buildMsg);
+        }
+
+        return messages.ToArray();
+    }
+
+    /// <summary>
+    /// Creates a DetailedBuildMessage from a cargo compiler message.
+    /// </summary>
+    private static DetailedBuildMessage CreateBuildMessage(
+        PathEx workspaceRoot,
+        CargoCompilerMessage msg,
+        IPathMapper pathMapper,
+        DiagnosticSpan span)
+    {
+        var diagnostic = msg.Message;
+
+        // Determine file path
+        string filePath = span?.FileName ?? msg.Target?.SrcPath ?? string.Empty;
+
+        // Map the file path for remote targets
+        string mappedFilePath = MapFilePath(workspaceRoot, filePath, pathMapper);
+
+        // Map the project file (manifest path)
+        string mappedProjectFile = MapFilePath(workspaceRoot, msg.ManifestPath, pathMapper);
+
+        var buildMsg = new DetailedBuildMessage
+        {
+            Code = diagnostic.Code?.Code ?? "RS0000",
+            ColumnNumber = span?.ColumnStart ?? 1,
+            File = mappedFilePath ?? string.Empty,
+            HelpKeyword = diagnostic.Code?.Code ?? "RS0000",
+            LineNumber = span?.LineStart ?? 1,
+            ProjectFile = mappedProjectFile ?? string.Empty,
+            SubCategory = string.Empty,  // Must not be null - crashes VS's native OutputStringThreadSafe
+            TaskText = diagnostic.Message ?? string.Empty,
+            Type = GetMessageType(diagnostic.Level),
         };
 
-        // Handle file path - may be Linux path from cargo for remote targets
-        string filePath = fileInfo != null && fileInfo.Value != null
-            ? (string)fileInfo.Value
-            : (string)msg.File;
+        // Create user-friendly log message
+        buildMsg.LogMessage = CreateLogMessage(diagnostic, buildMsg);
 
-        msg.File = MapFilePath(workspaceRoot, filePath, pathMapper);
-        msg.LogMessage = GetLogMessage(obj.message, msg);
+        return buildMsg;
+    }
 
-        return msg;
+    /// <summary>
+    /// Regex to match ANSI escape sequences (colors, formatting, etc.).
+    /// </summary>
+    private static readonly Regex AnsiEscapeRegex = new(@"\x1b\[[0-9;]*m", RegexOptions.Compiled);
+
+    /// <summary>
+    /// Creates a user-friendly log message from the diagnostic.
+    /// </summary>
+    private static string CreateLogMessage(RustcDiagnostic diagnostic, DetailedBuildMessage msg)
+    {
+        var logMsgText = $"{msg.File}({msg.LineNumber},{msg.ColumnNumber}): {msg.Type} {msg.Code}: {msg.TaskText}";
+
+        // Strip ANSI escape codes from rendered output - they can crash VS's native output pane
+        var rendered = !string.IsNullOrEmpty(diagnostic.Rendered)
+            ? $"Details:\r\n{StripAnsiCodes(diagnostic.Rendered)}"
+            : string.Empty;
+
+        return $"{logMsgText}\r\n{rendered}";
+    }
+
+    /// <summary>
+    /// Strips ANSI escape codes from a string.
+    /// Rustc outputs colored text with escape sequences like \x1b[31m that
+    /// can cause AccessViolationException in VS's native OutputStringThreadSafe.
+    /// </summary>
+    private static string StripAnsiCodes(string input)
+    {
+        if (string.IsNullOrEmpty(input))
+        {
+            return input;
+        }
+
+        return AnsiEscapeRegex.Replace(input, string.Empty);
     }
 
     /// <summary>
@@ -134,7 +230,7 @@ public static class BuildJsonOutputParser
     {
         if (string.IsNullOrEmpty(filePath))
         {
-            return filePath;
+            return string.Empty;  // Never return null - crashes VS's native OutputStringThreadSafe
         }
 
         // No mapper or local target - use traditional Path.Combine
@@ -150,88 +246,77 @@ public static class BuildJsonOutputParser
         }
 
         // Remote target - convert Linux path to VS-visible path
-        if (filePath.StartsWith("/", StringComparison.Ordinal))
+        try
         {
-            // Absolute Linux path - map directly
-            var remotePath = new RemotePath(filePath, pathMapper.Kind);
-            return (string)pathMapper.MapToLocal(remotePath);
-        }
-        else
-        {
-            // Relative path - combine with remote workspace root, then map
-            var remoteWorkspace = pathMapper.MapToRemote(workspaceRoot);
-            var fullRemotePath = remoteWorkspace.Combine(filePath);
-            return (string)pathMapper.MapToLocal(fullRemotePath);
-        }
-    }
-
-    private static dynamic GetProjectFile(dynamic obj, IPathMapper pathMapper)
-    {
-        string projectPath = null;
-
-        if (obj.manifest_path != null && obj.manifest_path.Value != null)
-        {
-            projectPath = obj.manifest_path.Value;
-        }
-        else
-        {
-            projectPath = obj.package_id.Value;
-        }
-
-        // Map the project file path for remote targets
-        if (pathMapper != null && pathMapper.Kind != TargetKind.Local && projectPath != null)
-        {
-            if (projectPath.StartsWith("/", StringComparison.Ordinal))
+            if (filePath.StartsWith("/", StringComparison.Ordinal))
             {
-                var remotePath = new RemotePath(projectPath, pathMapper.Kind);
+                // Absolute Linux path - map directly
+                var remotePath = new RemotePath(filePath, pathMapper.Kind);
                 return (string)pathMapper.MapToLocal(remotePath);
             }
+            else
+            {
+                // Relative path - combine with remote workspace root, then map
+                var remoteWorkspace = pathMapper.MapToRemote(workspaceRoot);
+                var fullRemotePath = remoteWorkspace.Combine(filePath);
+                return (string)pathMapper.MapToLocal(fullRemotePath);
+            }
         }
-
-        return projectPath;
+        catch
+        {
+            // If mapping fails, fall back to combining workspace root with the file path
+            // This ensures we still show a reasonable path in the output
+            var normalizedFilePath = filePath.Replace("/", @"\");
+            return Path.Combine(workspaceRoot, normalizedFilePath);
+        }
     }
 
-    private static dynamic GetMessageCode(dynamic obj)
-    {
-        return obj.code != null && obj.code.code != null
-            ? obj.code.code.Value
-            : "RS0000";
-    }
-
-    private static dynamic GetLogMessage(dynamic message, DetailedBuildMessage msg)
-    {
-        var logMsgText = $@"{msg.File}({msg.LineNumber},{msg.ColumnNumber}): {msg.Type} {msg.Code}: {msg.TaskText}";
-        var rendered = message.rendered != null ? $"Details:\r\n{message.rendered.Value}" : string.Empty;
-
-        return $"{logMsgText}\r\n{rendered}";
-    }
-
+    /// <summary>
+    /// Converts rustc level string to message type.
+    /// </summary>
     private static Level GetMessageType(string level)
     {
+        if (string.IsNullOrEmpty(level))
+        {
+            return Level.None;
+        }
+
         return LevelToMessageTypeMap.TryGetValue(level, out Level type)
             ? type
             : Level.Error;
     }
 
-    private static BuildMessage[] ParseCompilerArtifact(dynamic obj)
+    /// <summary>
+    /// Parses a compiler artifact message.
+    /// </summary>
+    private static BuildMessage[] ParseCompilerArtifact(CargoCompilerArtifact artifact)
     {
-        if ((bool)obj.fresh.Value)
+        if (artifact == null || artifact.Fresh)
         {
             return Array.Empty<BuildMessage>();
         }
 
-        var matches = CompilerArtifactMessageCracker1.Matches(obj.package_id.Value as string);
+        var packageId = artifact.PackageId ?? string.Empty;
+
+        var matches = CompilerArtifactMessageCracker1.Matches(packageId);
         if (matches.Count != 0)
         {
             return new[] { new StringBuildMessage { Message = $"   Compiling {matches[0].Groups[1].Value} v{matches[0].Groups[2].Value} ({matches[0].Groups[4].Value})" } };
         }
 
-        matches = CompilerArtifactMessageCracker2.Matches(obj.package_id.Value as string);
+        matches = CompilerArtifactMessageCracker2.Matches(packageId);
         if (matches.Count != 0)
         {
             return new[] { new StringBuildMessage { Message = $"   Compiling {matches[0].Groups[2].Value} v{matches[0].Groups[3].Value}" } };
         }
 
-        throw new InvalidDataException($"Unable to match. Will be shown as is in the output window.");
+        // If we can't parse the package_id, try to use the target name
+        if (artifact.Target != null && !string.IsNullOrEmpty(artifact.Target.Name))
+        {
+            return new[] { new StringBuildMessage { Message = $"   Compiling {artifact.Target.Name}" } };
+        }
+
+        // Fallback - just show something
+        return new[] { new StringBuildMessage { Message = $"   Compiling (unknown package)" } };
     }
 }
