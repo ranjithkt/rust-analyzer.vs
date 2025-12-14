@@ -39,7 +39,10 @@ public abstract class BaseToolchainCommand<T> : BaseCommand<T>
         }
 
         var path = selectedItems.First();
-        Command.Visible = Command.Enabled = path.IsManifest() && path.FileExists();
+
+        // For WSL paths, File.Exists might not work properly, so just check if it's a manifest
+        var isWslPath = WslPathMapper.TryGetDistroName(path, out _);
+        Command.Visible = Command.Enabled = path.IsManifest() && (isWslPath || path.FileExists());
     }
 
     protected override async Task ExecuteAsync(OleMenuCmdEventArgs e)
@@ -129,12 +132,26 @@ public abstract class BaseBuildToolChainCommand<T> : BaseCommand<T>
         ThreadHelper.ThrowIfNotOnUIThread();
 
         var workspaceRoot = CmdServices.GetWorkspaceRoot();
-        if (workspaceRoot == null)
+        if (workspaceRoot == null || !CmdServices.IsIdeInDesignMode())
         {
             return false;
         }
 
-        return (workspaceRoot.Value + Constants.ManifestFileName2).FileExists() && CmdServices.IsIdeInDesignMode();
+        // Check if Cargo.toml exists at the workspace root
+        var manifestPath = workspaceRoot.Value + Constants.ManifestFileName2;
+        if (manifestPath.FileExists())
+        {
+            return true;
+        }
+
+        // For WSL workspaces, enable commands even if the file check fails
+        // (UNC paths might have issues with File.Exists)
+        if (WslPathMapper.TryGetDistroName(workspaceRoot.Value, out _))
+        {
+            return true;
+        }
+
+        return false;
     }
 }
 

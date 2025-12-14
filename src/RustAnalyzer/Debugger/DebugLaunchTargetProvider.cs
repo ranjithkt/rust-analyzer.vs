@@ -18,7 +18,8 @@ using static Microsoft.VisualStudio.VSConstants;
 namespace KS.RustAnalyzer.Debugger;
 
 // TODO: Workaround for https://github.com/kitamstudios/rust-analyzer.vs/issues/24. Just implementing LaunchDebugTargetProviderOptions.IsRuntimeSupportContext should be enough but it does not work, for now setting priority to low.
-[ExportLaunchDebugTarget(LaunchDebugTargetProviderOptions.IsRuntimeSupportContext, ProviderType, new[] { ".exe" }, ProviderPriority.Lowest)]
+// Support both .exe (Windows) and empty extension (Linux/WSL binaries)
+[ExportLaunchDebugTarget(LaunchDebugTargetProviderOptions.IsRuntimeSupportContext, ProviderType, new[] { ".exe", "" }, ProviderPriority.Lowest)]
 public sealed class DebugLaunchTargetProvider : ILaunchDebugTargetProvider
 {
     public const string ProviderType = "{72D3FCEF-1111-4266-B8DD-D3ED06E35A2B}";
@@ -39,6 +40,21 @@ public sealed class DebugLaunchTargetProvider : ILaunchDebugTargetProvider
 
         try
         {
+            // Log the raw launch configuration for debugging
+            var lc = debugLaunchActionContext.LaunchConfiguration;
+            L.WriteLine("[LaunchDebugTarget] LaunchConfiguration type: {0}", lc?.GetType().FullName ?? "null");
+
+            if (lc != null)
+            {
+                L.WriteLine("[LaunchDebugTarget] Available keys:");
+                foreach (var key in new[] { LaunchConfigurationConstants.ProgramKey, LaunchConfigurationConstants.NameKey, LaunchConfigurationConstants.ProjectKey, LaunchConfigurationConstants.DebugTypeKey })
+                {
+                    var hasKey = lc.ContainsKey(key);
+                    var value = hasKey ? lc[key] : null;
+                    L.WriteLine("  - {0}: HasKey={1}, Value={2}, Type={3}", key, hasKey, value ?? "(null)", value?.GetType().Name ?? "N/A");
+                }
+            }
+
             var lcw = new LaunchConfigWrapper(debugLaunchActionContext.LaunchConfiguration, new TL { T = T, L = L, });
             L.WriteLine("[LaunchDebugTarget] Launch config created, running async...");
             workspaceContext.JTF.Run(async () => await LaunchDebugTargetAsync(workspaceContext, serviceProvider, lcw, default));
