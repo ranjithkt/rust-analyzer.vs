@@ -306,17 +306,45 @@ public sealed class ToolchainService : IToolchainService
             {
                 // Remote execution - use execution context
                 var remoteManifestPath = GetRemoteManifestPath(manifestPath, pathMapper);
-                var args = new[] { "metadata", "--no-deps", "--format-version", "1", "--manifest-path", remoteManifestPath, "--offline" };
                 var remoteWorkingDir = pathMapper.MapToRemote(manifestPath.GetDirectoryName());
+
+                // Try with --offline first, then retry without if it fails
+                var argsOffline = new[] { "metadata", "--no-deps", "--format-version", "1", "--manifest-path", remoteManifestPath, "--offline" };
 
                 var result = await executionContext.ExecuteAndCaptureAsync(
                     executionContext.CargoCommand,
-                    args,
+                    argsOffline,
                     remoteWorkingDir,
                     ct).ConfigureAwait(false);
 
                 var json = string.Join(string.Empty, result);
+
+                // If offline mode returned empty (no cached crates), retry without --offline
+                if (string.IsNullOrWhiteSpace(json) || !json.TrimStart().StartsWith("{", StringComparison.Ordinal))
+                {
+                    _tl.L.WriteLine("[Remote] cargo metadata --offline returned empty, retrying without --offline...");
+
+                    var argsOnline = new[] { "metadata", "--no-deps", "--format-version", "1", "--manifest-path", remoteManifestPath };
+                    result = await executionContext.ExecuteAndCaptureAsync(
+                        executionContext.CargoCommand,
+                        argsOnline,
+                        remoteWorkingDir,
+                        ct).ConfigureAwait(false);
+
+                    json = string.Join(string.Empty, result);
+                }
+
+                if (string.IsNullOrWhiteSpace(json))
+                {
+                    throw new InvalidOperationException($"cargo metadata returned empty output for {remoteManifestPath}. Check that the manifest path is correct and cargo is installed in the remote environment.");
+                }
+
                 var rawWorkspace = JsonConvert.DeserializeObject<RawWorkspace>(json);
+                if (rawWorkspace == null)
+                {
+                    throw new InvalidOperationException($"Failed to parse cargo metadata JSON for {remoteManifestPath}. JSON: {json.Substring(0, Math.Min(200, json.Length))}...");
+                }
+
                 var factory = new WorkspaceFactory();
                 var w = factory.Create(rawWorkspace, pathMapper);
                 return AddRootPackageIfNecessary(w, manifestPath);
