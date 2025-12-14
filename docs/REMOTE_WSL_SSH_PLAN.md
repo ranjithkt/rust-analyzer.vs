@@ -25,11 +25,13 @@ It is intentionally **design-only** (no implementation).
 9. [Error Handling Strategy](#error-handling-strategy)
 10. [Rollout Plan](#rollout-plan-risk-controlled)
 11. [Testing Strategy](#testing-strategy)
-12. [Risk Assessment](#risk-assessment)
-13. [Logging and Diagnostics](#logging-and-diagnostics)
-14. [Appendix: File Changes Summary](#appendix-file-changes-summary)
-15. [Appendix: Glossary](#appendix-glossary)
-16. [Appendix: Design Decisions Summary](#appendix-design-decisions-summary)
+12. [Visual Studio Edition Compatibility](#visual-studio-edition-compatibility)
+13. [Risk Assessment](#risk-assessment)
+14. [Logging and Diagnostics](#logging-and-diagnostics)
+15. [Appendix: File Changes Summary](#appendix-file-changes-summary)
+16. [Appendix: Glossary](#appendix-glossary)
+17. [Appendix: Design Decisions Summary](#appendix-design-decisions-summary)
+18. [Appendix: Pre-Implementation Codebase Review](#appendix-pre-implementation-codebase-review)
 
 ---
 
@@ -2666,6 +2668,117 @@ public class WslIntegrationTests : IClassFixture<WslTestFixture>
 
 ---
 
+## Visual Studio Edition Compatibility
+
+This extension targets **both Visual Studio 2022 and Visual Studio 2026** editions. This section documents compatibility considerations, version-specific behaviors, and known issues.
+
+### Version Matrix
+
+| Edition | Version Range | SDK Version | Internal Version | Status |
+|---------|--------------|-------------|------------------|--------|
+| **Visual Studio 2022** | 17.0 - 17.13+ | 17.x | 17.x | Primary (Stable) |
+| **Visual Studio 2026** | 18.0+ | 18.x | 18.x | Primary (New) |
+
+### VSIX Manifest Targeting
+
+The extension manifest (`source.extension.vsixmanifest`) must target both versions:
+
+```xml
+<InstallationTarget Id="Microsoft.VisualStudio.Community" Version="[17.0,19.0)">
+  <ProductArchitecture>amd64</ProductArchitecture>
+</InstallationTarget>
+```
+
+**Note:** Visual Studio 2026 introduces a new versioning scheme. Extensions targeting VS 2022 should generally work in VS 2026, but testing is required.
+
+### Key Differences Between Editions
+
+| Feature | VS 2022 | VS 2026 | Impact on This Extension |
+|---------|---------|---------|--------------------------|
+| **Architecture** | 64-bit | 64-bit | No change required |
+| **AI Integration** | Copilot (optional) | Deep Copilot Agent Mode | No direct impact; potential enhancement opportunity |
+| **UI Framework** | WPF-based | Fluent UI redesign | Custom dialogs may need visual updates |
+| **SDK Packages** | 17.x NuGet packages | 18.x NuGet packages | May need conditional compilation |
+| **Extension Compatibility** | Baseline | Backward compatible with caveats | Test all scenarios in both |
+| **MSVC Lifecycle** | Standard | 9-month servicing, 2-year LTS | No direct impact (Rust toolchain) |
+
+### SDK Package Strategy
+
+The current `RustAnalyzer.csproj` references:
+
+```xml
+<PackageReference Include="Microsoft.VisualStudio.SDK" Version="17.11.40262" />
+<Reference Include="Microsoft.VisualStudio.LanguageServer.Client">
+  <HintPath>..\external\vs.17.11\Microsoft.VisualStudio.LanguageServer.Client.dll</HintPath>
+</Reference>
+```
+
+**Recommendations:**
+
+1. **For VS 2022 compatibility:** Keep SDK version 17.x as baseline
+2. **For VS 2026 compatibility:** Test with 18.x SDK; create separate build configurations if breaking changes exist
+3. **Multi-targeting approach:**
+
+```xml
+<PropertyGroup Condition="'$(VSTargetVersion)' == '2026'">
+  <DefineConstants>$(DefineConstants);VS2026</DefineConstants>
+</PropertyGroup>
+```
+
+### Known VS 2026 Changes Affecting This Extension
+
+1. **Extension Marketplace Versioning:**
+   - VS 2026 uses a new versioning scheme
+   - Some extensions (e.g., DotVVM) have reported publishing issues
+   - **Action:** Test marketplace publishing early in development
+
+2. **Certificate Revocation Checks:**
+   - VS 2026 performs certificate revocation checks during network calls
+   - May affect SSH connections if certificates are problematic
+   - **Action:** Ensure SSH hosts have valid certificates or document workarounds
+
+3. **Fluent UI Design System:**
+   - VS 2026 has a modernized UI
+   - Custom dialogs (e.g., SSH connection dialog) should follow Fluent UI guidelines
+   - **Action:** Review and update custom UI elements for visual consistency
+
+4. **Settings Experience:**
+   - VS 2026 has a revamped settings UI
+   - Extension options may appear differently
+   - **Action:** Verify Options page renders correctly in both editions
+
+### API Compatibility Notes
+
+| API | VS 2022 | VS 2026 | Notes |
+|-----|---------|---------|-------|
+| `ILanguageClient` | ✅ | ✅ | Core LSP API unchanged |
+| `ILanguageClientMiddleLayer` | ✅ | ✅ | Used for URI rewriting |
+| `IVsFolderWorkspaceService` | ✅ | ✅ | Open Folder API |
+| `IFileContextProvider` | ✅ | ✅ | Build context API |
+| `VsDebugTargetInfo` | ✅ | ✅ | Debug launch API |
+| `ITestContainerDiscoverer` | ✅ | ✅ | Test adapter API |
+
+### Testing Requirements
+
+- [ ] All unit tests pass on VS 2022 17.12+
+- [ ] All unit tests pass on VS 2026 18.0+
+- [ ] Manual smoke test: Open WSL folder, build, debug, run tests
+- [ ] Manual smoke test: SSH connection, sync, build, debug
+- [ ] Extension installs correctly from VSIX in both editions
+- [ ] Extension installs correctly from Marketplace in both editions
+- [ ] Options page renders correctly
+- [ ] Custom dialogs render correctly with Fluent UI (VS 2026)
+
+### References
+
+- [Visual Studio 2026 Release Notes](https://learn.microsoft.com/en-us/visualstudio/releases/vs18/release-notes)
+- [Visual Studio 2022 Release Notes](https://learn.microsoft.com/en-us/visualstudio/releases/2022/release-notes)
+- [Visual Studio Product Lifecycle and Servicing](https://learn.microsoft.com/en-us/visualstudio/releases/2026/servicing-vs)
+- [Visual Studio Extensibility Documentation](https://learn.microsoft.com/en-us/visualstudio/extensibility/)
+- [VSIX Manifest Schema](https://learn.microsoft.com/en-us/visualstudio/extensibility/vsix-extension-schema-2-0-reference)
+
+---
+
 ## Risk Assessment
 
 | Risk | Likelihood | Impact | Mitigation |
@@ -2682,6 +2795,14 @@ public class WslIntegrationTests : IClassFixture<WslTestFixture>
 | LSP latency makes IntelliSense unusable | Low | High | Request batching; local caching; timeout handling |
 | WSL distro detection fails on some systems | Low | Medium | Manual distro entry fallback; clear error messages |
 | Community adoption confusion | Low | Medium | Clear documentation; feature flags; gradual rollout |
+| **Binary extension hardcoding breaks Linux builds** | High | High | `WorkspaceExtensions.CrateTypeInfos` hardcodes `.exe`; must add platform-aware extension logic |
+| **Windows-only executable constants break WSL** | High | High | `Constants.cs` defines `rustup.exe`, `cargo.exe`; parameterize via execution context |
+| **TestExecutablePathCracker regex fails on Linux** | High | High | Regex matches `\\` and `.exe`; must use JSON-based discovery for remote targets |
+| **TestContainer.DebugEngines returns Windows-only GUID** | Medium | Medium | Hardcodes `NativeOnly_guid`; make target-aware for MIEngine |
+| **File watcher may not work for SSH cached files** | Medium | Medium | `MetadataServiceFactory` uses host file watcher; document expected behavior |
+| **VS 2026 extension marketplace publishing issues** | Medium | Medium | New versioning scheme may cause issues; test publishing early |
+| **VS 2026 Fluent UI breaks custom dialogs** | Low | Low | Update custom UI to follow Fluent guidelines |
+| **rust-analyzer not installed in WSL** | Medium | Medium | Need installation strategy: prompt user or auto-install via rustup |
 
 ---
 
@@ -2894,8 +3015,8 @@ RemoteTelemetryEvents.TrackRemoteOperation(
 | File | Changes |
 |------|---------|
 | `TargetSystemCommands.cs` | Use ITargetSystemService instead of stub |
-| `ToolChainService.cs` | Route through IExecutionContext |
-| `ToolChainServiceExtensions.cs` | Route through IExecutionContext |
+| `ToolChainService.cs` | Route through IExecutionContext; remove `TestExecutablePathCracker` regex for remote |
+| `ToolChainServiceExtensions.cs` | Route through IExecutionContext; remove `cmd.exe` hardcoding |
 | `BuildJsonOutputParser.cs` | Add IPathMapper parameter |
 | `LanguageClient.cs` | Add middle layer, remote RA support |
 | `DebugLaunchTargetProvider.cs` | Target-aware debug launch |
@@ -2904,6 +3025,10 @@ RemoteTelemetryEvents.TrackRemoteOperation(
 | `TestExecutor.cs` | Remote test execution |
 | `PreReqsCheckService.cs` | Remote prerequisites |
 | `Options.cs` | Feature flags |
+| `WorkspaceExtensions.cs` | Platform-aware binary extension in `CrateTypeInfos` (remove `.exe` hardcoding) |
+| `Constants.cs` | Add Linux-compatible command names (remove `.exe` from `RustUpExe`, `CargoExe`) |
+| `TestContainer.cs` | Target-aware `DebugEngines` property (return MIEngine GUID for WSL/SSH) |
+| `source.extension.vsixmanifest` | Update `InstallationTarget` to support VS 2022 and VS 2026 |
 
 ---
 
@@ -2918,6 +3043,12 @@ RemoteTelemetryEvents.TrackRemoteOperation(
 | Path Mapper | Service to translate paths between VS-visible and remote formats |
 | MI Engine | Machine Interface debug engine used for Linux debugging in VS |
 | gdbserver | Remote debugging stub for GDB, runs on target system |
+| VS 2022 | Visual Studio 2022 (version 17.x) |
+| VS 2026 | Visual Studio 2026 (version 18.x), released 2025 |
+| Fluent UI | Microsoft's design system used in VS 2026's modernized UI |
+| VSIX | Visual Studio Extension package format |
+| InstallationTarget | VSIX manifest element specifying supported VS versions |
+| Copilot Agent Mode | AI-powered development assistance feature in VS 2026 |
 
 ---
 
@@ -2935,14 +3066,180 @@ This section summarizes all architectural decisions made in this document for qu
 | **Test Executable Discovery** | JSON-based (`--message-format=json`) | OS-neutral; stable cargo API; no regex fragility |
 | **Feature Flags** | Options page with VS restart | Safe rollout; clear user opt-in |
 | **SSH Approach** | Defer to spike (S1 preferred, S2 fallback) | Need to validate VS API availability first |
+| **Binary Extension** | Platform-aware lookup | Linux binaries have no extension; Windows uses `.exe` |
+| **Command Names** | Platform-aware via IExecutionContext | Linux: `cargo`, `rustup`; Windows: `cargo.exe`, `rustup.exe` |
+| **VS Edition Support** | Target both VS 2022 and VS 2026 | Maximum user reach; use SDK 17.x as baseline |
+| **rust-analyzer for WSL** | Discover via `which` + prompt for install | User controls WSL environment; avoid auto-installing |
 
 ---
 
-*Document Version: 3.0*
+## Appendix: Pre-Implementation Codebase Review
+
+This section documents findings from a comprehensive codebase review conducted prior to implementation. All items here must be addressed during implementation.
+
+### Critical Issues Requiring Code Changes
+
+#### 1. Binary Extension Hardcoding (`WorkspaceExtensions.cs`)
+
+**Location:** `src/RustAnalyzer.TestAdapter/Cargo/WorkspaceExtensions.cs`, line 21
+
+**Current Code:**
+```csharp
+[Workspace.CrateType.Bin] = (string.Empty, ".exe"),
+```
+
+**Problem:** Linux binaries have **no extension**. This will cause incorrect path generation for WSL/SSH targets.
+
+**Required Fix:**
+```csharp
+// Add platform-aware extension lookup
+public static string GetBinaryExtension(TargetKind kind) =>
+    kind == TargetKind.Local ? ".exe" : string.Empty;
+
+// Update CrateTypeInfos to be a method or use the mapper
+public static (string Prefix, string Extension) GetCrateTypeInfo(
+    Workspace.CrateType crateType, TargetKind targetKind)
+{
+    var baseInfo = CrateTypeInfosBase[crateType];
+    if (crateType == Workspace.CrateType.Bin)
+    {
+        return (baseInfo.Prefix, GetBinaryExtension(targetKind));
+    }
+    return baseInfo;
+}
+```
+
+#### 2. Windows-Only Executable Constants (`Constants.cs`)
+
+**Location:** `src/RustAnalyzer.TestAdapter/Constants.cs`, lines 21-23
+
+**Current Code:**
+```csharp
+public const string RustUpExe = "rustup.exe";
+public const string CargoExe = "cargo.exe";
+```
+
+**Problem:** Linux uses `rustup` and `cargo` (no `.exe` extension).
+
+**Required Fix:**
+```csharp
+// Keep for backward compatibility, but add platform-aware resolution
+public const string RustUpExeWindows = "rustup.exe";
+public const string CargoExeWindows = "cargo.exe";
+public const string RustUpExeLinux = "rustup";
+public const string CargoExeLinux = "cargo";
+
+// Or, resolve via IExecutionContext
+public static string GetCargoCommand(TargetKind kind) =>
+    kind == TargetKind.Local ? "cargo.exe" : "cargo";
+```
+
+#### 3. TestExecutablePathCracker Regex (`ToolChainService.cs`)
+
+**Location:** `src/RustAnalyzer.TestAdapter/Cargo/ToolChainService.cs`, line 21
+
+**Current Code:**
+```csharp
+private static readonly Regex TestExecutablePathCracker =
+    new(@"^\s*Executable( unittests)? (.*) \((.*\\(.*)\-[\da-f]{16}.exe)\)$$", ...);
+```
+
+**Problem:** This regex explicitly matches:
+- Windows path separators (`\\`)
+- `.exe` extension
+
+**Required Fix:**
+- For remote targets, **do not use this regex**
+- Use JSON-based discovery (`--message-format=json`) as documented in Phase W1.5
+- Add conditional logic:
+
+```csharp
+if (executionContext.Kind == TargetKind.Local)
+{
+    // Use existing regex for Windows
+}
+else
+{
+    // Use JSON-based discovery for WSL/SSH
+    return await GetTestExecutablesFromJsonAsync(manifestDir, ctx, profile, additionalArgs, ct);
+}
+```
+
+#### 4. TestContainer DebugEngines (`TestContainer.cs`)
+
+**Location:** `src/RustAnalyzer/TestAdapter/TestContainer.cs`, line 38
+
+**Current Code:**
+```csharp
+public IEnumerable<Guid> DebugEngines => new[] { VSConstants.DebugEnginesGuids.NativeOnly_guid };
+```
+
+**Problem:** Hardcodes Windows native debugging. WSL/SSH requires MIEngine.
+
+**Required Fix:**
+```csharp
+public IEnumerable<Guid> DebugEngines
+{
+    get
+    {
+        var targetKind = GetCurrentTargetKind(); // Need to inject or look up
+        return targetKind == TargetKind.Local
+            ? new[] { VSConstants.DebugEnginesGuids.NativeOnly_guid }
+            : new[] { MIEngineGuids.MIDebugEngine_guid }; // MIEngine for Linux
+    }
+}
+```
+
+### Verified Correct in Plan
+
+The following items were verified to be correctly addressed in the existing plan:
+
+| Item | Location | Plan Section |
+|------|----------|--------------|
+| `PathEx` Windows-centricity | `PathEx.cs:19` | Current Architecture |
+| `cmd.exe` hardcoding | `ToolChainServiceExtensions.cs:249` | Refactors Required |
+| Workspace DTO path corruption | `Workspace.cs` | Raw DTO + Factory Pattern |
+| `LanguageClient` without MiddleLayer | `LanguageClient.cs:57` | Phase W2 |
+| `TargetSystemCommands` stub | `TargetSystemCommands.cs` | Phase W0 |
+| `ContentDefinition` base type | `ContentDefinition.cs:12` | Existing Remote Infrastructure |
+
+### File Watcher Behavior
+
+**Concern:** `MetadataServiceFactory.cs` uses `workspaceContext.GetFileWatcherService()` for file change detection.
+
+**Analysis:**
+- **WSL UNC paths (`\\wsl$\...`):** Windows file watcher generally monitors these paths correctly
+- **SSH cache mode:** File watcher will work on local cache; remote changes won't be detected
+
+**Recommendation:** Document this behavior in user documentation. For SSH mode, consider adding a "Refresh" command to manually sync remote changes.
+
+### rust-analyzer Installation for WSL
+
+**Current Behavior:** `RlsInstallerService` downloads Windows binary from GitHub.
+
+**WSL Requirements:**
+1. Check if rust-analyzer exists in WSL via `which rust-analyzer`
+2. Check `~/.cargo/bin/rust-analyzer`
+3. If not found, show guidance dialog:
+   ```
+   rust-analyzer not found in WSL.
+
+   Install it by running in WSL:
+   rustup component add rust-analyzer
+
+   [Open WSL Terminal] [Retry] [Cancel]
+   ```
+
+**Note:** Do NOT auto-install. Users should control their WSL environment.
+
+---
+
+*Document Version: 4.0*
 *Last Updated: December 2024*
 *Status: Design Complete - Ready for Implementation*
 
 **Changelog:**
+- v4.0: Added Visual Studio 2022/2026 compatibility section; pre-implementation codebase review findings; additional risks identified (binary extension hardcoding, Windows-only constants, TestExecutablePathCracker regex, TestContainer.DebugEngines); updated modified files list; research from official VS documentation
 - v3.0: Added concrete implementations for all outstanding decisions (Cargo DTO factory, test containers, process cancellation, LSP URI fields, MEF integration, feature flags, logging)
 - v2.0: Initial comprehensive plan with interface contracts and phased rollout
 - v1.0: Original design proposal
