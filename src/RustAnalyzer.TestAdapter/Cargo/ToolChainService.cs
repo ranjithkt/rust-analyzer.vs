@@ -26,6 +26,7 @@ public sealed class ToolchainService : IToolchainService
     private static readonly Regex TestExecutablePathCrackerRemote = new(@"^\s*Executable( unittests)? (.*) \((.*/[^/]*-[\da-f]{16})\)$", RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
     private readonly TL _tl;
+    private readonly ISshFileSyncService _syncService;
 
     [ImportingConstructor]
     public ToolchainService([Import] ITelemetryService t, [Import] ILogger l)
@@ -35,6 +36,9 @@ public sealed class ToolchainService : IToolchainService
             T = t,
             L = l,
         };
+
+        // Create sync service for SSH file synchronization
+        _syncService = new SshFileSyncService();
     }
 
     /// <summary>
@@ -59,6 +63,28 @@ public sealed class ToolchainService : IToolchainService
 
         if (executionContext != null && executionContext.Kind != TargetKind.Local)
         {
+            // For SSH targets in LocalSync mode, sync files first
+            if (executionContext.Kind == TargetKind.Ssh && pathMapper is LocalToRemoteSyncMapper syncMapper)
+            {
+                _tl.L.WriteLine("[SSH] LocalSync mode detected. Syncing files to remote...");
+
+                var syncResult = await _syncService.SyncToRemoteAsync(
+                    syncMapper.LocalRoot,
+                    syncMapper.RemoteRoot,
+                    syncMapper.ConnectionInfo,
+                    progress: null,
+                    ct).ConfigureAwait(false);
+
+                if (!syncResult.Success)
+                {
+                    _tl.L.WriteLine("[SSH] Sync failed: {0}", syncResult.ErrorMessage);
+                    return false;
+                }
+
+                _tl.L.WriteLine("[SSH] Sync completed: {0} files synced, {1} skipped, {2} bytes in {3}ms",
+                    syncResult.FilesSynced, syncResult.FilesSkipped, syncResult.BytesTransferred, syncResult.Duration.TotalMilliseconds);
+            }
+
             // Remote execution
             success = await ExecuteRemoteOperationAsync(
                 "build",

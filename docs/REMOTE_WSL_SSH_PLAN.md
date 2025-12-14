@@ -2473,6 +2473,94 @@ public enum SshAuthMethod { Password, PrivateKey, Agent }
 
 ---
 
+## SSH Workspace Modes (Implementation)
+
+The extension implements **two SSH workspace modes**, matching Visual Studio's C++ Linux development model:
+
+### Mode 1: Local Sync Mode (C++ Style) — ✅ Implemented
+
+For typical development where source code is on Windows:
+
+```
+┌────────────────────┐     SFTP Sync      ┌────────────────────┐
+│  Local Windows     │  ──────────────►   │   Remote Linux     │
+│  C:\Repos\project  │                    │  ~/vs-sync/project │
+│  (Edit here)       │                    │  (Build here)      │
+└────────────────────┘     Error Map      └────────────────────┘
+                      ◄──────────────
+```
+
+**Implementation Components:**
+
+- `LocalToRemoteSyncMapper` - Maps local Windows paths ↔ remote sync paths
+- `ISshFileSyncService` / `SshFileSyncService` - SFTP-based file synchronization
+- `SshWorkspaceMode.LocalSync` - Enum value for this mode
+
+**User Workflow:**
+1. Open local Windows project folder in VS
+2. Select SSH target from dropdown
+3. Click Build → Extension syncs files via SCP/SFTP, then runs `cargo build` on remote
+4. Build errors show local file paths for navigation
+
+**Options:**
+- `SshRemoteSyncPath` - Base path on remote (default: `~/vs-sync`)
+- `SshAutoSyncOnBuild` - Auto-sync before build (default: `true`)
+
+### Mode 2: Remote Cache Mode — ✅ Implemented
+
+For when code exists on the remote machine:
+
+```
+┌────────────────────┐     Download       ┌────────────────────┐
+│  Local Cache       │  ◄──────────────   │   Remote Linux     │
+│  %LOCALAPPDATA%\   │                    │  /home/user/proj   │
+│  ssh-cache\...\    │     Upload         │  (Source of truth) │
+│  (VS opens this)   │  ──────────────►   │                    │
+└────────────────────┘                    └────────────────────┘
+```
+
+**Implementation Components:**
+
+- `SshPathMapper` - Maps local cache paths ↔ remote paths
+- Existing VS Remote File Explorer integration
+
+**User Workflow:**
+1. Open Remote File Explorer (View > Other Windows > Remote File Explorer)
+2. Connect to SSH host, navigate to project
+3. Download folder to local cache
+4. Open cached folder in VS → Mode 2 activates automatically
+
+### Mode Detection
+
+The extension automatically determines which mode to use:
+
+```csharp
+public SshWorkspaceMode GetWorkspaceMode(PathEx workspacePath)
+{
+    var sshCacheRoot = Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+        "rust-analyzer.vs", "ssh-cache");
+
+    if (workspacePath.StartsWith(sshCacheRoot))
+        return SshWorkspaceMode.RemoteCache;  // Mode 2
+    else
+        return SshWorkspaceMode.LocalSync;    // Mode 1
+}
+```
+
+### Comparison with Visual Studio C++ Linux Development
+
+| Feature | C++ in VS | rust-analyzer.vs |
+|---------|-----------|------------------|
+| Local source on Windows | ✅ Yes | ✅ Yes (Mode 1) |
+| Auto-sync to remote | ✅ rsync/sftp | ✅ SCP/SFTP |
+| Build on remote | ✅ Yes | ✅ Yes |
+| Error navigation to local | ✅ Yes | ✅ Yes |
+| Debug on remote | ✅ gdbserver | ✅ gdbserver |
+| Remote code + local cache | ✅ Yes | ✅ Yes (Mode 2) |
+
+---
+
 ## Refactors Required (Surgical, Not a Rewrite)
 
 ### 1. Stop Embedding Windows-Only Assumptions into Shared Logic

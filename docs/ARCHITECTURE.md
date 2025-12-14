@@ -872,6 +872,42 @@ SSH has an additional complexity that WSL does not: **Visual Studio must be able
 
 The current decision matrix and spike checklist lives in `docs/REMOTE_WSL_SSH_PLAN.md` (see “VS 2026 Remote Infrastructure Spike Plan” and “Spike Decision Matrix”).
 
+### SSH Workspace Modes (Implementation)
+
+The extension implements **two SSH workspace modes** following Visual Studio's C++ Linux development model:
+
+#### Mode 1: Local Sync Mode (C++ Style)
+
+Source code on Windows, synced to remote for builds:
+
+- **Source**: Local Windows folder (e.g., `C:\Repos2\Rust\my-project`)
+- **Editing**: User edits files locally in VS as normal
+- **On Build**: Files sync to remote via SFTP, then `cargo build` runs on remote
+- **Error navigation**: Remote paths mapped back to local files
+- **Implementation**: `LocalToRemoteSyncMapper` + `ISshFileSyncService`
+
+#### Mode 2: Remote Cache Mode
+
+Code exists on remote, cached locally for editing:
+
+- **Source**: Remote Linux machine (`/home/user/project`)
+- **Local cache**: `%LOCALAPPDATA%\rust-analyzer.vs\ssh-cache\{connection}\{path}`
+- **Editing**: VS opens local cache; changes uploaded to remote
+- **Build/Debug**: Execute on remote via `SshPathMapper`
+- **Use case**: Projects browsed via Remote File Explorer
+
+#### Mode Detection
+
+```csharp
+public SshWorkspaceMode GetWorkspaceMode(PathEx workspacePath)
+{
+    if (IsInSshCache(workspacePath))
+        return SshWorkspaceMode.RemoteCache;  // Mode 2
+    else
+        return SshWorkspaceMode.LocalSync;    // Mode 1
+}
+```
+
 ### Design References (Remote/WSL/SSH)
 
 - `docs/REMOTE_WSL_SSH_PLAN.md` — canonical phased plan (R0–R5), SSH approach matrix (S0/S1/S2), and spike checklist.

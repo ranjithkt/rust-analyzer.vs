@@ -102,4 +102,21 @@ public class Options : BaseOptionModel<Options>, ISettingsServiceDefaults
                  "Requires Visual Studio restart to take effect.")]
     [DefaultValue(false)]
     public bool EnableSshSupport { get; set; } = false;
+
+    [Browsable(true)]
+    [Category("Remote Development (Preview)")]
+    [DisplayName("SSH Remote Sync Path")]
+    [Description("Base path on remote SSH hosts where local projects are synced for building. " +
+                 "The project folder name will be appended to this path. " +
+                 "Use ~ for home directory. Default: ~/vs-sync")]
+    [DefaultValue("~/vs-sync")]
+    public string SshRemoteSyncPath { get; set; } = "~/vs-sync";
+
+    [Browsable(true)]
+    [Category("Remote Development (Preview)")]
+    [DisplayName("Auto-sync on SSH Build")]
+    [Description("Automatically sync local files to the remote SSH host before building. " +
+                 "Disable to manually manage file synchronization.")]
+    [DefaultValue(true)]
+    public bool SshAutoSyncOnBuild { get; set; } = true;
 }
