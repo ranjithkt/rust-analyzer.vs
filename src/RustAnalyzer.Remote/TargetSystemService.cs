@@ -48,6 +48,19 @@ public sealed class TargetSystemService : ITargetSystemService
         }
     }
 
+    /// <summary>
+    /// Updates the WSL and SSH enabled settings.
+    /// Call RefreshAvailableTargetsAsync after this to apply changes.
+    /// </summary>
+    public void UpdateSettings(bool wslEnabled, bool sshEnabled)
+    {
+        lock (_lock)
+        {
+            _wslEnabled = wslEnabled;
+            _sshEnabled = sshEnabled;
+        }
+    }
+
     /// <inheritdoc/>
     public ITargetSystem CurrentTarget
     {

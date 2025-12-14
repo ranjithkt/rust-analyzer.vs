@@ -40,18 +40,17 @@ public static class TargetSystemStore
             {
                 _currentWorkspaceRoot = workspaceRoot;
 
-                // Use Task.Run to avoid deadlock - Options.GetLiveInstanceAsync may need UI thread
-                var options = Task.Run(() => Options.GetLiveInstanceAsync()).GetAwaiter().GetResult();
-                var wslEnabled = options?.EnableWslSupport ?? false;
-                var sshEnabled = options?.EnableSshSupport ?? false;
-
-                // Auto-enable WSL for WSL workspaces (UNC paths like \\wsl$\... or \\wsl.localhost\...)
-                // This ensures WSL-first users don't need to manually enable WSL support
+                // Auto-detect WSL workspace from path - this is synchronous and safe
                 var isWslWorkspace = WslPathMapper.TryGetDistroName(workspaceRoot, out var detectedDistro);
+
+                // For WSL workspaces, always enable WSL support regardless of options
+                // For non-WSL workspaces, start with defaults and refresh later
+                var wslEnabled = isWslWorkspace;
+                var sshEnabled = false;
+
                 if (isWslWorkspace)
                 {
-                    wslEnabled = true;
-                    System.Diagnostics.Debug.WriteLine($"[TargetSystemStore] Auto-enabling WSL for workspace in distro: {detectedDistro}");
+                    System.Diagnostics.Debug.WriteLine($"[TargetSystemStore] WSL workspace detected in distro: {detectedDistro}");
                 }
 
                 System.Diagnostics.Debug.WriteLine($"[TargetSystemStore] Creating service: WSL={wslEnabled}, SSH={sshEnabled}, Workspace={workspaceRoot}");
@@ -61,39 +60,65 @@ public static class TargetSystemStore
                     wslEnabled,
                     sshEnabled);
 
-                // Initialize available targets - use Task.Run to avoid deadlock
-                // RefreshAvailableTargetsAsync runs wsl.exe which can block
-                Task.Run(async () => await _service.RefreshAvailableTargetsAsync(CancellationToken.None)).GetAwaiter().GetResult();
-
-                System.Diagnostics.Debug.WriteLine($"[TargetSystemStore] Available targets: {string.Join(", ", _service.AvailableTargets.Select(t => t.DisplayName))}");
-
-                // For WSL workspaces, don't restore saved target if it would switch to Local
-                // This ensures WSL-first users always start with the correct WSL target
-                if (isWslWorkspace)
-                {
-                    // The auto-detected WSL target should already be set in the constructor
-                    // Only restore if there's a saved WSL target (not Local)
-                    var savedTargetId = LoadLastSelectedTargetId(workspaceRoot);
-                    if (!string.IsNullOrEmpty(savedTargetId) && savedTargetId.StartsWith("wsl:", StringComparison.OrdinalIgnoreCase))
-                    {
-                        RestoreLastSelectedTarget(workspaceRoot);
-                    }
-                    else
-                    {
-                        System.Diagnostics.Debug.WriteLine($"[TargetSystemStore] WSL workspace - keeping auto-detected target: {_service.CurrentTarget?.DisplayName}");
-                    }
-                }
-                else
-                {
-                    // Restore last selected target for non-WSL workspaces
-                    RestoreLastSelectedTarget(workspaceRoot);
-                }
-
                 // Subscribe to target changes to persist selection
                 _service.TargetChanged += OnTargetChanged;
+
+                // Initialize asynchronously to avoid deadlock - fire and forget
+                // The service will update its targets in the background
+                _ = InitializeServiceAsync(_service, workspaceRoot, isWslWorkspace);
             }
 
             return _service;
+        }
+    }
+
+    /// <summary>
+    /// Initializes the service asynchronously to avoid blocking the UI thread.
+    /// </summary>
+    private static async Task InitializeServiceAsync(ITargetSystemService service, PathEx workspaceRoot, bool isWslWorkspace)
+    {
+        try
+        {
+            // Load options on background thread
+            var options = await Options.GetLiveInstanceAsync().ConfigureAwait(false);
+            var wslEnabled = isWslWorkspace || (options?.EnableWslSupport ?? false);
+            var sshEnabled = options?.EnableSshSupport ?? false;
+
+            System.Diagnostics.Debug.WriteLine($"[TargetSystemStore] Async init: WSL={wslEnabled}, SSH={sshEnabled}");
+
+            // Update service settings if needed (for non-WSL workspaces that have options enabled)
+            if (service is TargetSystemService tss)
+            {
+                tss.UpdateSettings(wslEnabled, sshEnabled);
+            }
+
+            // Refresh available targets
+            await service.RefreshAvailableTargetsAsync(CancellationToken.None).ConfigureAwait(false);
+
+            System.Diagnostics.Debug.WriteLine($"[TargetSystemStore] Available targets: {string.Join(", ", service.AvailableTargets.Select(t => t.DisplayName))}");
+
+            // Restore saved target selection
+            if (isWslWorkspace)
+            {
+                // For WSL workspaces, only restore if saved target is also WSL
+                var savedTargetId = LoadLastSelectedTargetId(workspaceRoot);
+                if (!string.IsNullOrEmpty(savedTargetId) && savedTargetId.StartsWith("wsl:", StringComparison.OrdinalIgnoreCase))
+                {
+                    RestoreLastSelectedTarget(workspaceRoot);
+                }
+                else
+                {
+                    System.Diagnostics.Debug.WriteLine($"[TargetSystemStore] WSL workspace - keeping auto-detected target: {service.CurrentTarget?.DisplayName}");
+                }
+            }
+            else
+            {
+                RestoreLastSelectedTarget(workspaceRoot);
+            }
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"[TargetSystemStore] Error in async init: {ex.Message}");
         }
     }
 
