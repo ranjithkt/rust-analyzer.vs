@@ -43,6 +43,15 @@ public static class TargetSystemStore
                 var wslEnabled = options?.EnableWslSupport ?? false;
                 var sshEnabled = options?.EnableSshSupport ?? false;
 
+                // Auto-enable WSL for WSL workspaces (UNC paths like \\wsl$\... or \\wsl.localhost\...)
+                // This ensures WSL-first users don't need to manually enable WSL support
+                var isWslWorkspace = WslPathMapper.TryGetDistroName(workspaceRoot, out var detectedDistro);
+                if (isWslWorkspace)
+                {
+                    wslEnabled = true;
+                    System.Diagnostics.Debug.WriteLine($"[TargetSystemStore] Auto-enabling WSL for workspace in distro: {detectedDistro}");
+                }
+
                 System.Diagnostics.Debug.WriteLine($"[TargetSystemStore] Creating service: WSL={wslEnabled}, SSH={sshEnabled}, Workspace={workspaceRoot}");
 
                 _service = new TargetSystemService(
@@ -55,8 +64,27 @@ public static class TargetSystemStore
 
                 System.Diagnostics.Debug.WriteLine($"[TargetSystemStore] Available targets: {string.Join(", ", _service.AvailableTargets.Select(t => t.DisplayName))}");
 
-                // Restore last selected target
-                RestoreLastSelectedTarget(workspaceRoot);
+                // For WSL workspaces, don't restore saved target if it would switch to Local
+                // This ensures WSL-first users always start with the correct WSL target
+                if (isWslWorkspace)
+                {
+                    // The auto-detected WSL target should already be set in the constructor
+                    // Only restore if there's a saved WSL target (not Local)
+                    var savedTargetId = LoadLastSelectedTargetId(workspaceRoot);
+                    if (!string.IsNullOrEmpty(savedTargetId) && savedTargetId.StartsWith("wsl:", StringComparison.OrdinalIgnoreCase))
+                    {
+                        RestoreLastSelectedTarget(workspaceRoot);
+                    }
+                    else
+                    {
+                        System.Diagnostics.Debug.WriteLine($"[TargetSystemStore] WSL workspace - keeping auto-detected target: {_service.CurrentTarget?.DisplayName}");
+                    }
+                }
+                else
+                {
+                    // Restore last selected target for non-WSL workspaces
+                    RestoreLastSelectedTarget(workspaceRoot);
+                }
 
                 // Subscribe to target changes to persist selection
                 _service.TargetChanged += OnTargetChanged;

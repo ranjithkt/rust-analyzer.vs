@@ -79,6 +79,13 @@ public abstract class BuildFileContextBase : IBuildFileContext
                 return false;
             }
         }
+        // Fallback: If no target is set but the workspace is a WSL path, auto-detect WSL
+        else if ((currentTarget == null || currentTarget.Kind == TargetKind.Local) &&
+                 WslPathMapper.TryGetDistroName(BuildTargetInfo.ManifestPath, out var detectedDistro))
+        {
+            executionContext = new WslExecutionContext(detectedDistro);
+            pathMapper = new WslPathMapper(detectedDistro);
+        }
 
         await RlsUpdatedNotification.ShowAsync();
 

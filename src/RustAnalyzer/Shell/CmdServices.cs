@@ -105,6 +105,14 @@ public sealed class CmdServices
                 return;
             }
         }
+        // Fallback: If no target is set but the manifest path is a WSL path, auto-detect WSL
+        else if ((currentTarget == null || currentTarget.Kind == TargetKind.Local) &&
+                 WslPathMapper.TryGetDistroName(manifestPath, out var detectedDistro))
+        {
+            L?.WriteLine("[CmdServices] Auto-detecting WSL target for distro: {0}", detectedDistro);
+            executionContext = new WslExecutionContext(detectedDistro);
+            pathMapper = new WslPathMapper(detectedDistro);
+        }
 
         // Map the operation to the remote-aware version
         RemoteToolchainOperation remoteOp = MapToRemoteOperation(op);
