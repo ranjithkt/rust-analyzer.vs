@@ -20,7 +20,7 @@ It is intentionally **design-only** (no implementation).
 4. [Interface Contracts](#interface-contracts)
 5. [MEF Integration](#mef-integration)
 6. [WSL Plan](#wsl-plan-phased)
-7. [SSH Plan](#ssh-plan-two-approaches)
+7. [SSH Plan](#ssh-plan-three-approaches)
 8. [Refactors Required](#refactors-required-surgical-not-a-rewrite)
 9. [Error Handling Strategy](#error-handling-strategy)
 10. [Rollout Plan](#rollout-plan-risk-controlled)
@@ -32,6 +32,7 @@ It is intentionally **design-only** (no implementation).
 16. [Appendix: Glossary](#appendix-glossary)
 17. [Appendix: Design Decisions Summary](#appendix-design-decisions-summary)
 18. [Appendix: Pre-Implementation Codebase Review](#appendix-pre-implementation-codebase-review)
+19. [Appendix: VS 2026 Remote Infrastructure Spike Plan](#appendix-vs-2026-remote-infrastructure-spike-plan)
 
 ---
 
@@ -243,11 +244,30 @@ This approach:
 
 ## Goals and Constraints
 
+### Development Strategy: VS 2026 First
+
+**Primary Target:** Visual Studio 2026 (version 18.x)
+**Secondary Target:** Visual Studio 2022 (version 17.x)
+
+**Rationale:**
+- VS 2026 has more mature remote development infrastructure (Remote File Explorer, Connection Manager)
+- Features developed for VS 2026 can be backported to VS 2022 where APIs are compatible
+- Common abstractions (IExecutionContext, IPathMapper) work across both versions
+
+**Implementation Order:**
+1. Implement core abstractions (Phase W0) - works on both versions
+2. Implement WSL support (Phase W1-W3) - works on both versions (uses `wsl.exe`)
+3. Implement SSH support leveraging VS 2026 infrastructure first
+4. Backport SSH support to VS 2022 (may require fallback implementations)
+
 ### Goals
 
 - **WSL**: Build, run, debug, and run rust-analyzer **inside WSL**, while the workspace is opened in VS via `\\wsl$\<distro>\...` paths.
 - **SSH**: Connect to a remote host over SSH, open a remote folder, build/run/debug remotely, and run rust-analyzer remotely.
+  - **Preferred workflow:** Use VS Remote File Explorer + Connection Manager
+  - **Fallback workflow:** Custom "Open SSH Folder" command with local cache
 - **Test Adapter**: Discover and execute tests in remote environments with results mapped back to VS.
+- **Git Integration**: Users clone repos on remote systems; extension opens cloned folders.
 
 ### Constraints
 
@@ -264,6 +284,105 @@ This approach:
 - Providing a full remote shell/terminal experience (out of scope for this extension).
 - Implementing a general-purpose remote filesystem provider unless VS exposes a supported public extension surface (otherwise use cache+sync).
 - Supporting remote Windows targets (this plan is Linux-first: WSL + SSH).
+
+### User Workflows (End-to-End)
+
+#### WSL Workflow (Primary)
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│ 1. USER SETUP (one-time)                                            │
+├─────────────────────────────────────────────────────────────────────┤
+│ • Install WSL2 with preferred distro (e.g., Ubuntu)                 │
+│ • Install Rust in WSL: curl --proto '=https' --tlsv1.2 -sSf        │
+│   https://sh.rustup.rs | sh                                         │
+│ • Install rust-analyzer: rustup component add rust-analyzer         │
+│ • Clone project in WSL: git clone <repo> ~/my-project               │
+└─────────────────────────────────────────────────────────────────────┘
+                                    ↓
+┌─────────────────────────────────────────────────────────────────────┐
+│ 2. OPEN IN VISUAL STUDIO                                            │
+├─────────────────────────────────────────────────────────────────────┤
+│ • File > Open > Folder                                              │
+│ • Browse to: \\wsl$\Ubuntu\home\user\my-project                     │
+│ • OR use Quick Launch: type path directly                           │
+│ • Extension detects WSL path, auto-selects WSL target               │
+└─────────────────────────────────────────────────────────────────────┘
+                                    ↓
+┌─────────────────────────────────────────────────────────────────────┐
+│ 3. DEVELOP                                                          │
+├─────────────────────────────────────────────────────────────────────┤
+│ • Edit code in VS editor (files accessed via UNC path)              │
+│ • IntelliSense powered by rust-analyzer running IN WSL              │
+│ • Build: cargo build runs IN WSL via wsl.exe                        │
+│ • Test: Tests run IN WSL, results shown in Test Explorer            │
+│ • Debug: F5 launches debugger via MIEngine/gdbserver                │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+#### SSH Workflow (VS 2026 - Using Remote File Explorer)
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│ 1. SETUP SSH CONNECTION                                             │
+├─────────────────────────────────────────────────────────────────────┤
+│ • Tools > Options > Cross Platform > Connection Manager             │
+│ • Click "Add" to create new SSH profile                             │
+│ • Enter: Host, Port (22), Username, Authentication method           │
+│ • Click "Verify" to test connection                                 │
+│ • Connection saved for future use                                   │
+└─────────────────────────────────────────────────────────────────────┘
+                                    ↓
+┌─────────────────────────────────────────────────────────────────────┐
+│ 2. BROWSE REMOTE FILES                                              │
+├─────────────────────────────────────────────────────────────────────┤
+│ • View > Other Windows > Remote File Explorer                       │
+│ • Select connection from dropdown (e.g., user@server:22)            │
+│ • Browse to project folder (e.g., /home/user/my-rust-project)       │
+│ • Ensure Rust is installed on remote: rustup, cargo, rust-analyzer  │
+└─────────────────────────────────────────────────────────────────────┘
+                                    ↓
+┌─────────────────────────────────────────────────────────────────────┐
+│ 3. OPEN PROJECT (Option S0/S1/S2 - TBD based on spike)             │
+├─────────────────────────────────────────────────────────────────────┤
+│ Option S0: Right-click folder > "Open" (if enabled)                 │
+│ Option S1: Native remote Open Folder (if VS API exists)             │
+│ Option S2: Right-click > "Open as Rust Workspace" (downloads cache) │
+└─────────────────────────────────────────────────────────────────────┘
+                                    ↓
+┌─────────────────────────────────────────────────────────────────────┐
+│ 4. DEVELOP                                                          │
+├─────────────────────────────────────────────────────────────────────┤
+│ • Edit code (in cache or remote, depending on approach)             │
+│ • IntelliSense from rust-analyzer running ON REMOTE                 │
+│ • Build: cargo runs ON REMOTE via SSH                               │
+│ • Test: Tests run ON REMOTE, results mapped back                    │
+│ • Debug: F5 via SSH tunnel + gdbserver                              │
+│ • File changes synced automatically (S2) or real-time (S0/S1)       │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+#### Command-Line Arguments & Environment Variables
+
+Both WSL and SSH workflows support:
+
+```
+Project Properties (right-click Cargo.toml > Properties):
+┌─────────────────────────────────────────────────────────────────────┐
+│ Debugging                                                           │
+├─────────────────────────────────────────────────────────────────────┤
+│ Command Arguments:     [--config myconfig.toml --verbose        ]   │
+│ Working Directory:     [/home/user/my-project                   ]   │
+│ Environment Variables: [RUST_LOG=debug RUST_BACKTRACE=1         ]   │
+└─────────────────────────────────────────────────────────────────────┘
+│ Testing                                                             │
+├─────────────────────────────────────────────────────────────────────┤
+│ Additional Test Args:  [--test-threads 1 --nocapture            ]   │
+│ Test Environment:      [RUST_BACKTRACE=full                     ]   │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+These settings are stored per-project and work identically for local, WSL, and SSH targets.
 
 ---
 
@@ -1881,28 +2000,109 @@ Current debug code is Windows-native-only; WSL debug must use a different integr
 
 ---
 
-## SSH Plan (Two Approaches)
+## SSH Plan (Three Approaches)
 
 SSH must solve "open remote folder" and "remote toolchain + remote debug + remote LSP".
-There are two approaches; pick based on desired UX and available supported VS APIs.
+There are three approaches; pick based on desired UX and available supported VS APIs.
 
-### Pre-Implementation Spike Required
+### VS 2026 Remote Development Infrastructure (Key Finding)
 
-Before choosing between S1 and S2, investigate:
+Visual Studio 2026 has **existing remote development infrastructure** that we should leverage:
 
-1. **Does `Microsoft.VisualStudio.Linux.ConnectionManager` provide usable APIs?**
-   - Check if it exposes SSH connection management
-   - Check if it provides file system access
+#### 1. Remote File Explorer (View > Other Windows > Remote File Explorer)
 
-2. **Does VS have a remote workspace filesystem provider API?**
-   - Research VS extensibility for remote "Open Folder"
+**Capabilities observed:**
+- Connects to SSH hosts using Connection Manager profiles
+- Browses remote Linux filesystem in a tree view
+- Context menu operations: Refresh, Download, Upload directory/files, Delete, Rename, Create directory, Copy Full Path
+- **"Open 'FolderName'" command exists but is DISABLED** ← Key finding!
+
+**Screenshot analysis (VS 2026):**
+```
+Remote File Explorer: root@127.0.0.1:22
+├── / (root filesystem)
+│   ├── root/
+│   │   ├── Rust/
+│   │   └── Rust2/  ← Right-click menu shows "Open 'Rust2'" DISABLED
+│   └── ...
+Context menu:
+  ✓ Refresh (F5)
+  ✗ Open 'Rust2' (Ctrl+Enter) ← DISABLED - investigate why!
+  ✓ Download 'Rust2'
+  ✓ Upload a directory to 'Rust2'
+  ✓ Upload files to 'Rust2'
+  ✓ Delete recursively 'Rust2' (Del)
+  ✓ Rename (F2)
+  ✓ Create directory...
+  ✓ Copy Full Path
+```
+
+**Investigation needed:** Why is "Open" disabled? Possible reasons:
+- Requires a specific project type (CMake, Makefile)?
+- Requires "Linux development with C++" workload?
+- Not supported for Open Folder scenarios?
+- API limitation for third-party extensions?
+
+#### 2. Connection Manager (Tools > Options > Cross Platform > Connection Manager)
+
+**Capabilities observed:**
+- Stores SSH connection profiles (Host, Port, Username, OS type)
+- Add/Edit/Verify/Remove connections
+- Profiles can be used for "build or debugging, or in projects that use remote builds"
+- Accessible programmatically via `Microsoft.VisualStudio.Linux.ConnectionManager` namespace (TBD)
+
+**Screenshot analysis (VS 2026):**
+```
+Connection Manager
+┌────────┬───────────┬──────┬──────────┬─────────────┐
+│ Default│ Host Name │ Port │ Username │ OS          │
+├────────┼───────────┼──────┼──────────┼─────────────┤
+│   ●    │ 127.0.0.1 │  22  │ root     │ Debian (x64)│
+└────────┴───────────┴──────┴──────────┴─────────────┘
+"The connections added here can be used later for build or
+debugging, or in projects that use remote builds."
+```
+
+#### 3. Related VS 2026 Infrastructure
+
+Also under `Cross Platform`:
+- **Logging and Diagnostics** - Remote operation logging
+- **Remote file explorer** - Settings for the Remote File Explorer
+- **More Settings** - Additional cross-platform options
+
+### Pre-Implementation Spike Required (Updated with VS 2026 Findings)
+
+**Priority: VS 2026 first, then backport to VS 2022**
+
+Before choosing between S0, S1, and S2, investigate:
+
+1. **[HIGH PRIORITY] Why is "Open" disabled in Remote File Explorer?**
+   - Check if installing "Linux development with C++" workload enables it
+   - Check if creating a CMakeLists.txt or Makefile in the folder enables it
+   - Check if there's an API to enable this for arbitrary folders
+   - Search VS SDK for `RemoteFileExplorer` or related APIs
+
+2. **Does `Microsoft.VisualStudio.Linux.ConnectionManager` provide usable APIs?**
+   - Check if it exposes SSH connection profiles programmatically
+   - Check if it provides SFTP/file transfer capabilities
+   - Check if it provides command execution on remote hosts
+   - Assembly location: likely `Microsoft.VisualStudio.Linux.ConnectionManager.dll`
+
+3. **Can we hook into or extend Remote File Explorer?**
+   - Check if there's an extensibility point to add "Open as Rust Project" context menu
+   - Check if we can programmatically trigger "Open Folder" after download
+
+4. **Does VS 2026 have new remote workspace APIs?**
+   - Research VS 2026 release notes for remote development changes
    - Check if `IVsHierarchy` can be implemented for remote files
+   - Look for new `Microsoft.VisualStudio.Workspace.Remote` namespace
 
-3. **Decide SSH implementation strategy (tooling):**
-   - Use built-in Windows OpenSSH (`ssh.exe`/`sftp.exe`) with non-interactive flows, **or**
-   - Use a managed SSH library (e.g., SSH.NET) for richer streaming and better control.
+5. **Decide SSH implementation strategy (tooling):**
+   - **Preferred:** Reuse VS Connection Manager for connection handling
+   - **Fallback:** Use built-in Windows OpenSSH (`ssh.exe`/`sftp.exe`)
+   - **Alternative:** Use a managed SSH library (e.g., SSH.NET)
 
-4. **Evaluate reusing Visual Studio’s built-in “Connection Manager” instead of implementing SSH connection UX ourselves.**
+6. **Reuse Visual Studio's built-in Connection Manager for SSH profile storage**
 
    Visual Studio has an existing SSH connection system for remote Linux development (and, historically, WSL via `localhost`), including:
 
@@ -1936,6 +2136,43 @@ Before choosing between S1 and S2, investigate:
 - **Login noise can break IDE probes.** Extra output like MOTD/mail banners may confuse remote probes; consider advising users to disable noisy PAM MOTD modules for the SSH server used by VS tooling.
 
 These constraints are corroborated by local notes from a WSL2 + SSH setup where VS accepted an ECDSA key in PEM format, rejected OpenSSH-format keys and PuTTY `.ppk`, and required algorithm pinning for successful negotiation.
+
+### Option S0 — Enable/Extend Remote File Explorer "Open" Command (Best if Possible)
+
+**Goal:** Make the disabled "Open 'FolderName'" command work for Rust projects.
+
+**Investigation tasks:**
+1. Check if "Open" is enabled when:
+   - "Linux development with C++" workload is installed
+   - A `CMakeLists.txt` exists in the remote folder
+   - A `Makefile` exists in the remote folder
+
+2. If enabled by CMake/Makefile presence, try:
+   - Creating a dummy `CMakeLists.txt` with Rust-aware content
+   - Using VS's Open Folder (not CMake project) mode
+
+3. Check if we can add a custom context menu item:
+   - "Open as Rust Workspace" in Remote File Explorer
+   - Would download folder to cache + open locally
+
+**If S0 works (ideal scenario):**
+```
+User Flow:
+1. User opens Remote File Explorer (View > Other Windows > Remote File Explorer)
+2. User connects to SSH host via Connection Manager
+3. User browses to /home/user/my-rust-project
+4. User right-clicks → "Open 'my-rust-project'" (if enabled) OR "Open as Rust Workspace"
+5. VS opens the folder, extension takes over for build/debug/LSP
+```
+
+**Pros:**
+- Uses existing VS infrastructure (Connection Manager, Remote File Explorer)
+- No custom SSH connection UI needed
+- Familiar workflow for users of C++ Linux development
+
+**Cons:**
+- May require C++ workload dependency
+- May not be extensible by third-party extensions
 
 ### Option S1 — Integrate with VS-supported Remote Workspace Filesystem (Preferred if Supported)
 
@@ -2384,6 +2621,18 @@ public void TrackRemoteError(RemoteException ex)
 
 ## Rollout Plan (Risk-Controlled)
 
+### Version Strategy
+
+| Phase | VS 2026 | VS 2022 | Notes |
+|-------|---------|---------|-------|
+| R0 (Target System Plumbing) | ✅ | ✅ | Same implementation |
+| R1 (WSL Build) | ✅ | ✅ | Same implementation |
+| R1.5 (WSL Tests) | ✅ | ✅ | Same implementation |
+| R2 (WSL LSP) | ✅ | ✅ | Same implementation |
+| R3 (WSL Debug) | ✅ | ✅ | Same MIEngine |
+| R4 (SSH Open Folder) | ✅ First | ⏳ Backport | May use different APIs |
+| R5 (SSH LSP/Debug) | ✅ First | ⏳ Backport | May use different APIs |
+
 ### Phase R0 — Target System Plumbing
 
 **Scope:**
@@ -2451,32 +2700,58 @@ public void TrackRemoteError(RemoteException ex)
 - [ ] Breakpoints work
 - [ ] Source navigation works
 
-### Phase R4 — SSH "Open Folder" Model + Build Support
+### Phase R4 — SSH "Open Folder" Model + Build Support (VS 2026 First)
 
-**Scope:**
-- Decide S1 vs S2 based on spike results
-- SSH connection management UI
+**Spike Phase (before implementation):**
+- [ ] Install "Linux development with C++" workload in VS 2026
+- [ ] Test if Remote File Explorer "Open" becomes enabled
+- [ ] Test if presence of CMakeLists.txt/Makefile enables "Open"
+- [ ] Search VS SDK for `RemoteFileExplorer` APIs
+- [ ] Search VS SDK for `ConnectionManager` APIs
+- [ ] Document findings and choose S0/S1/S2
+
+**Scope (depends on spike results):**
+
+**If S0 works (Remote File Explorer "Open" can be enabled/extended):**
+- Integrate with existing Connection Manager for SSH profiles
+- Add "Open as Rust Workspace" context menu if needed
+- Implement `SshExecutionContext` using VS's SSH infrastructure
+- Build support via SSH command execution
+
+**If S1 works (VS remote workspace API exists):**
+- Implement remote filesystem provider
+- Integrate with Connection Manager
 - `SshExecutionContext` implementation
-- File sync (if S2)
+- Build support
+
+**If S2 required (Local cache fallback):**
+- Custom "Open SSH Folder" command
+- SSH profile management (prefer Connection Manager integration)
+- `SshExecutionContext` implementation
+- File sync service via SFTP
 - Build support
 
 **Success Criteria:**
-- [ ] Can open SSH folder
-- [ ] Build works on remote
-- [ ] Errors navigate correctly
+- [ ] VS 2026: Can open SSH folder using preferred approach
+- [ ] VS 2026: Build works on remote
+- [ ] VS 2026: Errors navigate correctly
+- [ ] VS 2022: Backport works (may have reduced functionality)
 
 ### Phase R5 — SSH rust-analyzer + Debug + Polish
 
 **Scope:**
-- SSH LSP support
-- SSH debugging (gdbserver)
+- SSH LSP support (rust-analyzer running on remote)
+- SSH debugging (gdbserver via SSH tunnel)
 - Performance optimization
-- Documentation
+- Documentation for both VS 2022 and VS 2026
+- Handle VS version differences gracefully
 
 **Success Criteria:**
 - [ ] Full feature parity with WSL
 - [ ] Acceptable latency for common operations
 - [ ] User documentation complete
+- [ ] Works on VS 2022 (with documented limitations if any)
+- [ ] Works on VS 2026 (full feature set)
 
 ---
 
@@ -3070,6 +3345,10 @@ This section summarizes all architectural decisions made in this document for qu
 | **Command Names** | Platform-aware via IExecutionContext | Linux: `cargo`, `rustup`; Windows: `cargo.exe`, `rustup.exe` |
 | **VS Edition Support** | Target both VS 2022 and VS 2026 | Maximum user reach; use SDK 17.x as baseline |
 | **rust-analyzer for WSL** | Discover via `which` + prompt for install | User controls WSL environment; avoid auto-installing |
+| **VS Version Strategy** | VS 2026 first, backport to VS 2022 | VS 2026 has better remote infrastructure |
+| **SSH Approach Priority** | S0 > S1 > S2 | Prefer native VS integration over custom implementation |
+| **Connection Manager** | Reuse if API available | Avoid reimplementing SSH profile management |
+| **Git Workflow** | User clones on remote | Extension opens existing folders; not a git client |
 
 ---
 
@@ -3234,11 +3513,120 @@ The following items were verified to be correctly addressed in the existing plan
 
 ---
 
-*Document Version: 4.0*
+## Appendix: VS 2026 Remote Infrastructure Spike Plan
+
+This appendix documents the specific spike investigations needed before implementing SSH support.
+
+### Spike 1: Remote File Explorer "Open" Command Investigation
+
+**Objective:** Determine if/how the disabled "Open" command in Remote File Explorer can be enabled.
+
+**Tasks:**
+1. Install "Linux development with C++" workload
+2. Connect to SSH host via Connection Manager
+3. Test "Open" command with various folder contents:
+   - Empty folder
+   - Folder with `CMakeLists.txt`
+   - Folder with `Makefile`
+   - Folder with `Cargo.toml` only
+   - Folder with `.sln` or `.csproj`
+4. Document which conditions enable/disable the "Open" command
+5. Check if "Open" command exists in VS 2022 with same behavior
+
+**Expected Outcomes:**
+- [ ] Documented conditions for "Open" enablement
+- [ ] Screenshots of enabled vs disabled states
+- [ ] Decision: Can we leverage this for Rust projects?
+
+### Spike 2: Connection Manager API Investigation
+
+**Objective:** Determine if Connection Manager APIs are accessible to extensions.
+
+**Tasks:**
+1. Search VS SDK assemblies for `ConnectionManager` types
+2. Check these potential namespaces:
+   - `Microsoft.VisualStudio.Linux.ConnectionManager`
+   - `Microsoft.VisualStudio.Linux.RemoteConnections`
+   - `Microsoft.Internal.VisualStudio.Linux`
+3. Attempt to retrieve list of saved connections
+4. Attempt to execute command on remote host
+5. Attempt to transfer files via connection
+
+**Code to try:**
+```csharp
+// Try to find and load ConnectionManager assembly
+var asm = Assembly.LoadFrom(
+    @"C:\Program Files\Microsoft Visual Studio\2026\...\Microsoft.VisualStudio.Linux.ConnectionManager.dll");
+
+// Explore types
+foreach (var type in asm.GetExportedTypes())
+{
+    Console.WriteLine($"{type.FullName}");
+}
+```
+
+**Expected Outcomes:**
+- [ ] List of available APIs
+- [ ] Sample code for connection retrieval
+- [ ] Decision: Can we reuse Connection Manager?
+
+### Spike 3: Remote File Explorer Extensibility
+
+**Objective:** Determine if we can add custom context menu items to Remote File Explorer.
+
+**Tasks:**
+1. Search VS SDK for Remote File Explorer extensibility
+2. Check if `IMenuCommandService` works in Remote File Explorer context
+3. Check if we can register custom commands via VSCT
+4. Try adding "Open as Rust Workspace" command
+
+**Expected Outcomes:**
+- [ ] Document extensibility options
+- [ ] Sample VSCT for custom command
+- [ ] Decision: Can we extend Remote File Explorer?
+
+### Spike 4: VS 2022 Remote Infrastructure Comparison
+
+**Objective:** Document differences between VS 2022 and VS 2026 remote capabilities.
+
+**Tasks:**
+1. Check if Remote File Explorer exists in VS 2022
+2. Check if Connection Manager exists in VS 2022
+3. Compare API surfaces between versions
+4. Document version-specific code paths needed
+
+**Expected Outcomes:**
+- [ ] Compatibility matrix
+- [ ] List of VS 2026-only features
+- [ ] Backport strategy for VS 2022
+
+### Spike Decision Matrix
+
+After completing spikes, use this matrix to choose approach:
+
+| Condition | Approach | Rationale |
+|-----------|----------|-----------|
+| "Open" works with Cargo.toml | S0 | Native VS integration |
+| "Open" works with CMakeLists.txt only | S0 + dummy CMake | Minimal workaround |
+| Connection Manager APIs available | S1 or S2 | Reuse SSH infrastructure |
+| Remote File Explorer extensible | S0 variant | Add custom command |
+| None of the above | S2 | Full custom implementation |
+
+---
+
+*Document Version: 5.0*
 *Last Updated: December 2024*
 *Status: Design Complete - Ready for Implementation*
 
 **Changelog:**
+- v5.0: Major update based on VS 2026 Remote File Explorer investigation:
+  - Added VS 2026-first development strategy
+  - Documented Remote File Explorer capabilities and "Open" command disabled state
+  - Documented Connection Manager integration opportunity
+  - Added Option S0 (enable/extend Remote File Explorer)
+  - Added detailed user workflow diagrams for WSL and SSH
+  - Updated rollout plan with version strategy table
+  - Added spike tasks for SSH implementation decision
 - v4.0: Added Visual Studio 2022/2026 compatibility section; pre-implementation codebase review findings; additional risks identified (binary extension hardcoding, Windows-only constants, TestExecutablePathCracker regex, TestContainer.DebugEngines); updated modified files list; research from official VS documentation
 - v3.0: Added concrete implementations for all outstanding decisions (Cargo DTO factory, test containers, process cancellation, LSP URI fields, MEF integration, feature flags, logging)
 - v2.0: Initial comprehensive plan with interface contracts and phased rollout
