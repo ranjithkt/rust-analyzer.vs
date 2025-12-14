@@ -31,13 +31,20 @@ public static class TargetSystemStore
             if (_service == null && workspaceRoot != null)
             {
                 var options = Options.GetLiveInstanceAsync().GetAwaiter().GetResult();
+                var wslEnabled = options?.EnableWslSupport ?? false;
+                var sshEnabled = options?.EnableSshSupport ?? false;
+
+                System.Diagnostics.Debug.WriteLine($"[TargetSystemStore] Creating service: WSL={wslEnabled}, SSH={sshEnabled}, Workspace={workspaceRoot}");
+
                 _service = new TargetSystemService(
                     workspaceRoot,
-                    options?.EnableWslSupport ?? false,
-                    options?.EnableSshSupport ?? false);
+                    wslEnabled,
+                    sshEnabled);
 
                 // Initialize available targets synchronously to ensure they're ready
                 _service.RefreshAvailableTargetsAsync(CancellationToken.None).GetAwaiter().GetResult();
+
+                System.Diagnostics.Debug.WriteLine($"[TargetSystemStore] Available targets: {string.Join(", ", _service.AvailableTargets.Select(t => t.DisplayName))}");
             }
 
             return _service;
@@ -69,6 +76,20 @@ public static class TargetSystemStore
 
     /// <summary>
     /// Gets the available target display names for the combo.
+    /// </summary>
+    public static string[] GetAvailableTargetDisplayNames(PathEx workspaceRoot)
+    {
+        var service = GetService(workspaceRoot);
+        if (service == null)
+        {
+            return new[] { LocalTargetSystem.Instance.DisplayName };
+        }
+
+        return service.AvailableTargets.Select(t => t.DisplayName).ToArray();
+    }
+
+    /// <summary>
+    /// Gets the available target display names for the combo (uses cached service).
     /// </summary>
     public static string[] AvailableTargetDisplayNames
     {
@@ -136,11 +157,19 @@ public sealed class TargetSystemComboGetListCommand : BaseRustAnalyzerCommand<Ta
 {
     protected override void ExecuteCore(object sender, OleMenuCmdEventArgs eventArgs)
     {
+        ThreadHelper.ThrowIfNotOnUIThread();
+
         EnsureArg.IsNotNull(eventArgs);
         EnsureArg.IsNotDefault(eventArgs.OutValue);
 
         var vOut = eventArgs.OutValue;
 
-        Marshal.GetNativeVariantForObject(TargetSystemStore.AvailableTargetDisplayNames, vOut);
+        // Get workspace root to initialize the service if needed
+        var workspaceRoot = CmdServices.GetWorkspaceRoot();
+        var targets = workspaceRoot.HasValue
+            ? TargetSystemStore.GetAvailableTargetDisplayNames(workspaceRoot.Value)
+            : new[] { LocalTargetSystem.Instance.DisplayName };
+
+        Marshal.GetNativeVariantForObject(targets, vOut);
     }
 }

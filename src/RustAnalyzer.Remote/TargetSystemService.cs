@@ -114,21 +114,36 @@ public sealed class TargetSystemService : ITargetSystemService
     {
         var newTargets = new List<ITargetSystem> { LocalTargetSystem.Instance };
 
+        System.Diagnostics.Debug.WriteLine($"[RefreshAvailableTargets] WSL enabled: {_wslEnabled}, SSH enabled: {_sshEnabled}");
+
         // Add WSL distros if enabled
-        if (_wslEnabled && WslExecutionContext.IsWslAvailable())
+        if (_wslEnabled)
         {
-            var distros = await WslExecutionContext.GetInstalledDistrosAsync(ct).ConfigureAwait(false);
-            foreach (var distro in distros)
+            var wslAvailable = WslExecutionContext.IsWslAvailable();
+            System.Diagnostics.Debug.WriteLine($"[RefreshAvailableTargets] WSL available: {wslAvailable}");
+
+            if (wslAvailable)
             {
-                newTargets.Add(new WslTargetSystem(distro));
+                var distros = await WslExecutionContext.GetInstalledDistrosAsync(ct).ConfigureAwait(false);
+                System.Diagnostics.Debug.WriteLine($"[RefreshAvailableTargets] Found {distros.Length} WSL distros: {string.Join(", ", distros)}");
+                foreach (var distro in distros)
+                {
+                    newTargets.Add(new WslTargetSystem(distro));
+                }
             }
         }
 
         // Add SSH profiles if enabled
-        if (_sshEnabled && SshExecutionContext.IsSshAvailable())
+        if (_sshEnabled)
         {
-            var sshProfiles = GetSshProfiles();
-            newTargets.AddRange(sshProfiles);
+            var sshAvailable = SshExecutionContext.IsSshAvailable();
+            System.Diagnostics.Debug.WriteLine($"[RefreshAvailableTargets] SSH available: {sshAvailable}");
+
+            if (sshAvailable)
+            {
+                var sshProfiles = GetSshProfiles();
+                newTargets.AddRange(sshProfiles);
+            }
         }
 
         lock (_lock)
@@ -160,10 +175,15 @@ public sealed class TargetSystemService : ITargetSystemService
             ".ssh",
             "config");
 
+        System.Diagnostics.Debug.WriteLine($"[GetSshProfiles] Looking for SSH config at: {sshConfigPath}");
+
         if (!System.IO.File.Exists(sshConfigPath))
         {
+            System.Diagnostics.Debug.WriteLine($"[GetSshProfiles] SSH config file not found");
             return profiles;
         }
+
+        System.Diagnostics.Debug.WriteLine($"[GetSshProfiles] SSH config file found, parsing...");
 
         try
         {
@@ -245,9 +265,12 @@ public sealed class TargetSystemService : ITargetSystemService
                     profiles.Add(new SshTargetSystem(currentHost));
                 }
             }
+
+            System.Diagnostics.Debug.WriteLine($"[GetSshProfiles] Found {profiles.Count} SSH profiles");
         }
-        catch
+        catch (Exception ex)
         {
+            System.Diagnostics.Debug.WriteLine($"[GetSshProfiles] Error reading SSH config: {ex.Message}");
             // If we can't read the config, just return empty list
         }
 
