@@ -89,8 +89,15 @@ public class FileScanner : IFileScanner, IFileScannerUpToDateCheck
 
     private Task<bool> IsValidFileAsync(string filePath)
     {
-        var ext = ((PathEx)filePath).GetExtension();
-        return (ext.Equals(Constants.RustFileExtension) || ext.Equals(Constants.ManifestFileExtension)).ToTask();
+        var path = (PathEx)filePath;
+        var ext = path.GetExtension();
+        var fileName = path.GetFileName();
+
+        // Check for .rs files or specifically Cargo.toml (not just any .toml)
+        var isRustFile = ext.Equals(Constants.RustFileExtension);
+        var isCargoToml = fileName.Equals(Constants.ManifestFileName2, StringComparison.OrdinalIgnoreCase);
+
+        return (isRustFile || isCargoToml).ToTask();
     }
 
     private List<FileDataValue> GetFileDataValues(Workspace.Package package, PathEx filePath)

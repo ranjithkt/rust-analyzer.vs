@@ -12,7 +12,7 @@ namespace KS.RustAnalyzer.Editor;
 [ExportFileScanner(
     type: ProviderType,
     language: "Rust",
-    supportedFileExtensions: new[] { Constants.ManifestFileName, Constants.RustFileExtension, },
+    supportedFileExtensions: new[] { Constants.ManifestFileExtension, Constants.RustFileExtension, },
     supportedTypes: new[] { typeof(IReadOnlyCollection<FileDataValue>), typeof(IReadOnlyCollection<FileReferenceInfo>) },
     priority: ProviderPriority.Normal)]
 public class FileScannerFactory : IWorkspaceProviderFactory<IFileScanner>
