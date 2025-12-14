@@ -60,6 +60,23 @@ public interface ISshFileSyncService
         SshConnectionInfo connectionInfo,
         IProgress<SyncProgress> progress,
         CancellationToken ct);
+
+    /// <summary>
+    /// Synchronizes a project and all its path dependencies to the remote.
+    /// Parses Cargo.toml to find path dependencies and syncs them recursively.
+    /// </summary>
+    /// <param name="localRoot">Local workspace root path (containing Cargo.toml).</param>
+    /// <param name="remoteRoot">Remote destination root path for the main project.</param>
+    /// <param name="connectionInfo">SSH connection information.</param>
+    /// <param name="progress">Optional progress callback.</param>
+    /// <param name="ct">Cancellation token.</param>
+    /// <returns>Sync result with statistics including dependencies.</returns>
+    Task<SyncResult> SyncProjectWithDependenciesAsync(
+        PathEx localRoot,
+        RemotePath remoteRoot,
+        SshConnectionInfo connectionInfo,
+        IProgress<SyncProgress> progress,
+        CancellationToken ct);
 }
 
 /// <summary>

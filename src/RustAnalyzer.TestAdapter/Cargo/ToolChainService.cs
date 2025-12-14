@@ -72,13 +72,15 @@ public sealed class ToolchainService : IToolchainService
                 // Create redirector to write sync status to output window
                 var syncRedirector = new BuildOutputRedirector(bos.OutputSink, bti.ManifestPath.GetDirectoryName(), null, null);
                 syncRedirector.WriteLineWithoutProcessing(string.Empty);
-                syncRedirector.WriteLineWithoutProcessing("==== SSH Sync: Started ====");
+                syncRedirector.WriteLineWithoutProcessing("==== SSH Sync: Started (with dependencies) ====");
                 syncRedirector.WriteLineWithoutProcessing($"       Local : {syncMapper.LocalRoot}");
                 syncRedirector.WriteLineWithoutProcessing($"      Remote : {syncMapper.RemoteRoot}");
                 syncRedirector.WriteLineWithoutProcessing($"  Connection : {syncMapper.ConnectionInfo.DisplayName}");
+                syncRedirector.WriteLineWithoutProcessing($"  Note: Path dependencies from Cargo.toml will be synced automatically");
                 syncRedirector.WriteLineWithoutProcessing(string.Empty);
 
-                var syncResult = await _syncService.SyncToRemoteAsync(
+                // Sync project AND all path dependencies from Cargo.toml
+                var syncResult = await _syncService.SyncProjectWithDependenciesAsync(
                     syncMapper.LocalRoot,
                     syncMapper.RemoteRoot,
                     syncMapper.ConnectionInfo,
@@ -94,10 +96,10 @@ public sealed class ToolchainService : IToolchainService
                     return false;
                 }
 
-                _tl.L.WriteLine("[SSH] Sync completed: {0} files synced, {1} skipped, {2} bytes in {3}ms",
+                _tl.L.WriteLine("[SSH] Sync completed: {0} files synced (including dependencies), {1} skipped, {2} bytes in {3}ms",
                     syncResult.FilesSynced, syncResult.FilesSkipped, syncResult.BytesTransferred, syncResult.Duration.TotalMilliseconds);
-                syncRedirector.WriteLineWithoutProcessing($"==== SSH Sync: Completed ====");
-                syncRedirector.WriteLineWithoutProcessing($"  Files synced: {syncResult.FilesSynced}");
+                syncRedirector.WriteLineWithoutProcessing($"==== SSH Sync: Completed (with dependencies) ====");
+                syncRedirector.WriteLineWithoutProcessing($"  Files synced: {syncResult.FilesSynced} (including path dependencies)");
                 syncRedirector.WriteLineWithoutProcessing($"  Files skipped: {syncResult.FilesSkipped}");
                 syncRedirector.WriteLineWithoutProcessing($"  Bytes transferred: {syncResult.BytesTransferred}");
                 syncRedirector.WriteLineWithoutProcessing($"  Duration: {syncResult.Duration.TotalMilliseconds:F0}ms");

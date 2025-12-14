@@ -200,6 +200,101 @@ public sealed class SshFileSyncService : ISshFileSyncService
         }
     }
 
+    /// <inheritdoc/>
+    public async Task<SyncResult> SyncProjectWithDependenciesAsync(
+        PathEx localRoot,
+        RemotePath remoteRoot,
+        SshConnectionInfo connectionInfo,
+        IProgress<SyncProgress> progress,
+        CancellationToken ct)
+    {
+        var stopwatch = Stopwatch.StartNew();
+        int totalFilesSynced = 0;
+        int totalFilesSkipped = 0;
+        long totalBytesTransferred = 0;
+        var syncedPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        try
+        {
+            // First, sync the main project
+            var mainResult = await SyncToRemoteAsync(localRoot, remoteRoot, connectionInfo, progress, ct).ConfigureAwait(false);
+            if (!mainResult.Success)
+            {
+                return mainResult;
+            }
+
+            totalFilesSynced += mainResult.FilesSynced;
+            totalFilesSkipped += mainResult.FilesSkipped;
+            totalBytesTransferred += mainResult.BytesTransferred;
+            syncedPaths.Add((string)localRoot);
+
+            // Find the Cargo.toml file
+            var cargoTomlPath = localRoot + "Cargo.toml";
+            if (!File.Exists((string)cargoTomlPath))
+            {
+                // No Cargo.toml, just return the main project sync result
+                stopwatch.Stop();
+                return SyncResult.Succeeded(totalFilesSynced, totalFilesSkipped, totalBytesTransferred, stopwatch.Elapsed);
+            }
+
+            // Get all path dependencies recursively
+            var dependencies = CargoTomlParser.GetAllPathDependenciesRecursive(cargoTomlPath);
+
+            if (dependencies.Count == 0)
+            {
+                stopwatch.Stop();
+                return SyncResult.Succeeded(totalFilesSynced, totalFilesSkipped, totalBytesTransferred, stopwatch.Elapsed);
+            }
+
+            // Sync each dependency
+            foreach (var dependency in dependencies)
+            {
+                ct.ThrowIfCancellationRequested();
+
+                // Skip if already synced
+                if (syncedPaths.Contains((string)dependency.AbsoluteLocalPath))
+                {
+                    continue;
+                }
+
+                // Calculate the remote path for this dependency
+                var depRemotePath = CargoTomlParser.CalculateRemotePath(dependency, remoteRoot);
+
+                // Sync the dependency
+                var depResult = await SyncToRemoteAsync(
+                    dependency.AbsoluteLocalPath,
+                    depRemotePath,
+                    connectionInfo,
+                    progress,
+                    ct).ConfigureAwait(false);
+
+                if (!depResult.Success)
+                {
+                    // Log warning but continue with other dependencies
+                    // A missing dependency will cause cargo build to fail anyway with a clear error
+                    totalFilesSkipped++;
+                    continue;
+                }
+
+                totalFilesSynced += depResult.FilesSynced;
+                totalFilesSkipped += depResult.FilesSkipped;
+                totalBytesTransferred += depResult.BytesTransferred;
+                syncedPaths.Add((string)dependency.AbsoluteLocalPath);
+            }
+
+            stopwatch.Stop();
+            return SyncResult.Succeeded(totalFilesSynced, totalFilesSkipped, totalBytesTransferred, stopwatch.Elapsed);
+        }
+        catch (OperationCanceledException)
+        {
+            return SyncResult.Failed("Sync was cancelled.");
+        }
+        catch (Exception ex)
+        {
+            return SyncResult.Failed($"Sync failed: {ex.Message}");
+        }
+    }
+
     private static IEnumerable<PathEx> GetFilesToSync(PathEx localRoot)
     {
         var rootDir = (string)localRoot;
