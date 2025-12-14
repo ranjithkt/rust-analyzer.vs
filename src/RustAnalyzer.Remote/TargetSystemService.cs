@@ -148,23 +148,110 @@ public sealed class TargetSystemService : ITargetSystemService
     }
 
     /// <summary>
-    /// Gets saved SSH profiles.
-    /// For now, returns an empty list. In the future, this could read from:
-    /// - Visual Studio's Connection Manager
-    /// - A custom configuration file
-    /// - SSH config file (~/.ssh/config)
+    /// Gets saved SSH profiles by parsing ~/.ssh/config.
     /// </summary>
     private IEnumerable<ITargetSystem> GetSshProfiles()
     {
-        // TODO: Implement SSH profile discovery
-        // Options:
-        // 1. Read from VS Connection Manager if available
-        // 2. Read from custom settings file
-        // 3. Parse ~/.ssh/config for Host entries
+        var profiles = new List<ITargetSystem>();
 
-        // For now, return empty - users can add connections programmatically
-        // or we can add a UI for adding SSH connections later
-        return Enumerable.Empty<ITargetSystem>();
+        // Parse ~/.ssh/config for Host entries
+        var sshConfigPath = System.IO.Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+            ".ssh",
+            "config");
+
+        if (!System.IO.File.Exists(sshConfigPath))
+        {
+            return profiles;
+        }
+
+        try
+        {
+            var lines = System.IO.File.ReadAllLines(sshConfigPath);
+            SshConnectionInfo currentHost = null;
+
+            foreach (var rawLine in lines)
+            {
+                var line = rawLine.Trim();
+
+                // Skip comments and empty lines
+                if (string.IsNullOrEmpty(line) || line.StartsWith("#", StringComparison.Ordinal))
+                {
+                    continue;
+                }
+
+                // Split on first whitespace
+                var parts = line.Split(new[] { ' ', '\t' }, 2, StringSplitOptions.RemoveEmptyEntries);
+                if (parts.Length < 2)
+                {
+                    continue;
+                }
+
+                var key = parts[0].ToLowerInvariant();
+                var value = parts[1].Trim();
+
+                if (key == "host")
+                {
+                    // Save previous host if valid
+                    if (currentHost != null && !string.IsNullOrEmpty(currentHost.Host))
+                    {
+                        // Skip wildcard patterns
+                        if (!currentHost.Host.Contains("*") && !currentHost.Host.Contains("?"))
+                        {
+                            profiles.Add(new SshTargetSystem(currentHost));
+                        }
+                    }
+
+                    // Start new host - use Host value as both alias and initial hostname
+                    currentHost = new SshConnectionInfo { Host = value };
+                }
+                else if (currentHost != null)
+                {
+                    switch (key)
+                    {
+                        case "hostname":
+                            currentHost.Host = value;
+                            break;
+                        case "user":
+                            currentHost.Username = value;
+                            break;
+                        case "port":
+                            if (int.TryParse(value, out var port))
+                            {
+                                currentHost.Port = port;
+                            }
+
+                            break;
+                        case "identityfile":
+                            // Expand ~ to home directory
+                            if (value.StartsWith("~/", StringComparison.Ordinal))
+                            {
+                                value = System.IO.Path.Combine(
+                                    Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+                                    value.Substring(2));
+                            }
+
+                            currentHost.IdentityFile = value;
+                            break;
+                    }
+                }
+            }
+
+            // Don't forget the last host
+            if (currentHost != null && !string.IsNullOrEmpty(currentHost.Host))
+            {
+                if (!currentHost.Host.Contains("*") && !currentHost.Host.Contains("?"))
+                {
+                    profiles.Add(new SshTargetSystem(currentHost));
+                }
+            }
+        }
+        catch
+        {
+            // If we can't read the config, just return empty list
+        }
+
+        return profiles;
     }
 
     /// <inheritdoc/>

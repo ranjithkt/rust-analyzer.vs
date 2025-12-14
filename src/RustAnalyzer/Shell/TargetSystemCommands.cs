@@ -36,8 +36,8 @@ public static class TargetSystemStore
                     options?.EnableWslSupport ?? false,
                     options?.EnableSshSupport ?? false);
 
-                // Initialize available targets
-                _ = _service.RefreshAvailableTargetsAsync(CancellationToken.None);
+                // Initialize available targets synchronously to ensure they're ready
+                _service.RefreshAvailableTargetsAsync(CancellationToken.None).GetAwaiter().GetResult();
             }
 
             return _service;
