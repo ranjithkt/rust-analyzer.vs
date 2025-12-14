@@ -33,6 +33,9 @@ public sealed class FileContextProviderFactory : IWorkspaceProviderFactory<IFile
     [Import]
     public IPreReqsCheckService PreReqs { get; set; }
 
+    [Import]
+    public IWorkspaceContextAccessor WorkspaceContextAccessor { get; set; }
+
     public IFileContextProvider CreateProvider(IWorkspace workspaceContext)
     {
         T.TrackEvent(
@@ -40,6 +43,6 @@ public sealed class FileContextProviderFactory : IWorkspaceProviderFactory<IFile
             new[] { ("Location", workspaceContext.Location) });
         L.WriteLine("Creating {0}.", GetType().Name);
 
-        return new FileContextProvider(workspaceContext.GetService<IMetadataService>(), CargoService, OutputPane, workspaceContext.GetService<ISettingsService>());
+        return new FileContextProvider(workspaceContext.GetService<IMetadataService>(), CargoService, OutputPane, workspaceContext.GetService<ISettingsService>(), WorkspaceContextAccessor);
     }
 }

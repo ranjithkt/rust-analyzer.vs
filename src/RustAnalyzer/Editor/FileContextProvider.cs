@@ -16,13 +16,15 @@ public sealed class FileContextProvider : IFileContextProvider, IFileContextProv
     private readonly IToolchainService _cargoService;
     private readonly IBuildOutputSink _outputPane;
     private readonly ISettingsService _settingsService;
+    private readonly IWorkspaceContextAccessor _contextAccessor;
 
-    public FileContextProvider(IMetadataService mds, IToolchainService cargoService, IBuildOutputSink outputPane, ISettingsService settingsService)
+    public FileContextProvider(IMetadataService mds, IToolchainService cargoService, IBuildOutputSink outputPane, ISettingsService settingsService, IWorkspaceContextAccessor contextAccessor)
     {
         _mds = mds;
         _cargoService = cargoService;
         _outputPane = outputPane;
         _settingsService = settingsService;
+        _contextAccessor = contextAccessor;
     }
 
     public Task<IReadOnlyCollection<FileContext>> GetContextsForFileAsync(string filePath, string context, CancellationToken cancellationToken)
@@ -62,13 +64,14 @@ public sealed class FileContextProvider : IFileContextProvider, IFileContextProv
                                     AdditionalTestExecutionArguments = args.AdditionalTestExecutionArguments,
                                     TestExecutionEnvironment = args.TestExecutionEnvironment,
                                 },
-                                _outputPane),
+                                _outputPane,
+                                _contextAccessor),
                             new[] { (string)fp },
                             displayName: profile),
                         new FileContext(
                             FileContextProviderFactory.ProviderTypeGuid,
                             BuildContextTypes.CleanContextTypeGuid,
-                            new CleanFileContext(_cargoService, new BuildTargetInfo { Profile = profile, WorkspaceRoot = package.WorkspaceRoot, ManifestPath = fp }, _outputPane),
+                            new CleanFileContext(_cargoService, new BuildTargetInfo { Profile = profile, WorkspaceRoot = package.WorkspaceRoot, ManifestPath = fp }, _outputPane, _contextAccessor),
                             new[] { (string)fp },
                             displayName: profile),
                     })
@@ -112,7 +115,8 @@ public sealed class FileContextProvider : IFileContextProvider, IFileContextProv
                             ManifestPath = target.Parent.ManifestPath,
                             AdditionalBuildArgs = $"{target.AdditionalBuildArgs} {additionalBuildArgs}".Trim(),
                         },
-                        _outputPane),
+                        _outputPane,
+                        _contextAccessor),
                 inputFiles: new[] { (string)target.SourcePath },
                 displayName: profile),
         };
