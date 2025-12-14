@@ -71,11 +71,13 @@ public sealed class ToolchainService : IToolchainService
 
                 // Create redirector to write sync status to output window
                 var syncRedirector = new BuildOutputRedirector(bos.OutputSink, bti.ManifestPath.GetDirectoryName(), null, null);
+                var syncMethod = SshFileSyncService.GetAvailableSyncMethod();
                 syncRedirector.WriteLineWithoutProcessing(string.Empty);
                 syncRedirector.WriteLineWithoutProcessing("==== SSH Sync: Started (with dependencies) ====");
                 syncRedirector.WriteLineWithoutProcessing($"       Local : {syncMapper.LocalRoot}");
                 syncRedirector.WriteLineWithoutProcessing($"      Remote : {syncMapper.RemoteRoot}");
                 syncRedirector.WriteLineWithoutProcessing($"  Connection : {syncMapper.ConnectionInfo.DisplayName}");
+                syncRedirector.WriteLineWithoutProcessing($"      Method : {syncMethod}");
                 syncRedirector.WriteLineWithoutProcessing($"  Note: Path dependencies from Cargo.toml will be synced automatically");
                 syncRedirector.WriteLineWithoutProcessing(string.Empty);
 

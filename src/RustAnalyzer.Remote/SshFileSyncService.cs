@@ -11,11 +11,16 @@ using KS.RustAnalyzer.TestAdapter.Common;
 namespace KS.RustAnalyzer.Remote;
 
 /// <summary>
-/// SFTP-based implementation of file synchronization for SSH targets.
-/// Uses OpenSSH sftp/scp commands for file transfers.
+/// File synchronization service for SSH targets.
+/// Uses the best available method: rsync > tar+ssh > scp
 /// </summary>
 public sealed class SshFileSyncService : ISshFileSyncService
 {
+    // Cached tool availability (checked once per session)
+    private static bool? _rsyncAvailable;
+    private static bool? _tarAvailable;
+    private static readonly object _toolCheckLock = new();
+
     // Files/directories to exclude from sync
     private static readonly HashSet<string> ExcludedNames = new(StringComparer.OrdinalIgnoreCase)
     {
@@ -42,6 +47,59 @@ public sealed class SshFileSyncService : ISshFileSyncService
         ".sh",
     };
 
+    /// <summary>
+    /// Gets which sync method is available (for diagnostics).
+    /// </summary>
+    public static string GetAvailableSyncMethod()
+    {
+        EnsureToolsChecked();
+        if (_rsyncAvailable == true) return "rsync (incremental, fast)";
+        if (_tarAvailable == true) return "tar+ssh (compressed, single connection)";
+        return "scp (basic recursive copy)";
+    }
+
+    private static void EnsureToolsChecked()
+    {
+        lock (_toolCheckLock)
+        {
+            if (_rsyncAvailable == null)
+            {
+                _rsyncAvailable = IsToolAvailable("rsync", "--version");
+                Debug.WriteLine($"[SshFileSyncService] rsync available: {_rsyncAvailable}");
+            }
+
+            if (_tarAvailable == null)
+            {
+                _tarAvailable = IsToolAvailable("tar", "--version");
+                Debug.WriteLine($"[SshFileSyncService] tar available: {_tarAvailable}");
+            }
+        }
+    }
+
+    private static bool IsToolAvailable(string tool, string testArg)
+    {
+        try
+        {
+            var psi = new ProcessStartInfo
+            {
+                FileName = tool,
+                Arguments = testArg,
+                UseShellExecute = false,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                CreateNoWindow = true,
+            };
+
+            using var proc = Process.Start(psi);
+            proc?.WaitForExit(3000);
+            return proc?.ExitCode == 0;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
     /// <inheritdoc/>
     public async Task<SyncResult> SyncToRemoteAsync(
         PathEx localRoot,
@@ -59,15 +117,17 @@ public sealed class SshFileSyncService : ISshFileSyncService
 
             // Count files that would be synced (for reporting)
             var filesToSync = GetFilesToSync(localRoot).ToList();
+            var syncMethod = GetAvailableSyncMethod();
+
             progress?.Report(new SyncProgress
             {
-                CurrentFile = "Syncing directory...",
+                CurrentFile = $"Syncing via {syncMethod}...",
                 FilesProcessed = 0,
                 TotalFiles = filesToSync.Count,
                 BytesTransferred = 0,
             });
 
-            // Use recursive scp to copy entire directory (much faster than file-by-file)
+            // Use the best available method
             var success = await CopyDirectoryToRemoteAsync(localRoot, remoteRoot, connectionInfo, ct).ConfigureAwait(false);
 
             stopwatch.Stop();
@@ -80,7 +140,7 @@ public sealed class SshFileSyncService : ISshFileSyncService
             }
             else
             {
-                return SyncResult.Failed("Failed to sync directory to remote.");
+                return SyncResult.Failed($"Failed to sync directory to remote using {syncMethod}.");
             }
         }
         catch (OperationCanceledException)
@@ -484,8 +544,8 @@ public sealed class SshFileSyncService : ISshFileSyncService
     }
 
     /// <summary>
-    /// Copies an entire local directory to the remote using rsync (preferred) or scp -r (fallback).
-    /// Uses rsync for efficient incremental sync with proper excludes.
+    /// Copies an entire local directory to the remote using the best available method.
+    /// Priority: rsync (incremental) > tar+ssh (compressed) > scp (basic)
     /// </summary>
     private static async Task<bool> CopyDirectoryToRemoteAsync(
         PathEx localDir,
@@ -493,14 +553,152 @@ public sealed class SshFileSyncService : ISshFileSyncService
         SshConnectionInfo connectionInfo,
         CancellationToken ct)
     {
-        // Try rsync first (much more efficient, supports excludes, incremental)
-        if (await TryRsyncToRemoteAsync(localDir, remoteDir, connectionInfo, ct).ConfigureAwait(false))
+        EnsureToolsChecked();
+
+        // Try rsync first (best - incremental, supports excludes, compressed)
+        if (_rsyncAvailable == true)
         {
-            return true;
+            Debug.WriteLine("[SshFileSyncService] Using rsync for sync");
+            var result = await TryRsyncToRemoteAsync(localDir, remoteDir, connectionInfo, ct).ConfigureAwait(false);
+            if (result)
+            {
+                return true;
+            }
+
+            // rsync failed, try next method
+            Debug.WriteLine("[SshFileSyncService] rsync failed, trying tar+ssh");
         }
 
-        // Fall back to scp -r
+        // Try tar+ssh (good - compressed, single connection, supports excludes)
+        if (_tarAvailable == true)
+        {
+            Debug.WriteLine("[SshFileSyncService] Using tar+ssh for sync");
+            var result = await TryTarSshToRemoteAsync(localDir, remoteDir, connectionInfo, ct).ConfigureAwait(false);
+            if (result)
+            {
+                return true;
+            }
+
+            // tar failed, try next method
+            Debug.WriteLine("[SshFileSyncService] tar+ssh failed, falling back to scp");
+        }
+
+        // Fall back to scp -r (basic - works everywhere but slower)
+        Debug.WriteLine("[SshFileSyncService] Using scp -r for sync (fallback)");
         return await ScpDirectoryToRemoteAsync(localDir, remoteDir, connectionInfo, ct).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Syncs using tar piped over SSH. Very efficient - single connection, compressed, handles excludes.
+    /// Works with tar from Git for Windows or Windows 10+.
+    /// </summary>
+    private static async Task<bool> TryTarSshToRemoteAsync(
+        PathEx localDir,
+        RemotePath remoteDir,
+        SshConnectionInfo connectionInfo,
+        CancellationToken ct)
+    {
+        try
+        {
+            // Build exclude arguments for tar
+            var excludeArgs = new StringBuilder();
+            foreach (var exclude in ExcludedNames)
+            {
+                if (!exclude.Contains("*"))
+                {
+                    excludeArgs.Append($" --exclude=\"{exclude}\"");
+                }
+            }
+
+            // Build SSH command
+            var sshCmd = new StringBuilder();
+            sshCmd.Append($"ssh -o StrictHostKeyChecking=accept-new -o BatchMode=yes");
+
+            if (!string.IsNullOrEmpty(connectionInfo.IdentityFile))
+            {
+                sshCmd.Append($" -i \"{connectionInfo.IdentityFile}\"");
+            }
+
+            if (connectionInfo.Port != 22)
+            {
+                sshCmd.Append($" -p {connectionInfo.Port}");
+            }
+
+            sshCmd.Append($" {connectionInfo.Username}@{connectionInfo.Host}");
+
+            // Remote directory with $HOME expanded
+            var remoteDirStr = (string)remoteDir;
+            string remoteExtractCmd;
+            if (remoteDirStr.Contains("$HOME"))
+            {
+                remoteExtractCmd = $"\"mkdir -p {remoteDirStr} && tar -xzf - -C {remoteDirStr}\"";
+            }
+            else
+            {
+                remoteExtractCmd = $"\"mkdir -p '{remoteDirStr}' && tar -xzf - -C '{remoteDirStr}'\"";
+            }
+
+            // Full command: tar -czf - [excludes] -C localDir . | ssh user@host "mkdir -p remotedir && tar -xzf - -C remotedir"
+            var localPath = (string)localDir;
+
+            // Use cmd.exe to run the piped command on Windows
+            var cmdArgs = $"/c tar -czf -{excludeArgs} -C \"{localPath}\" . | {sshCmd} {remoteExtractCmd}";
+
+            Debug.WriteLine($"[SshFileSyncService] tar+ssh command: cmd.exe {cmdArgs}");
+
+            var psi = new ProcessStartInfo
+            {
+                FileName = "cmd.exe",
+                Arguments = cmdArgs,
+                UseShellExecute = false,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                CreateNoWindow = true,
+            };
+
+            using var proc = Process.Start(psi);
+            if (proc == null)
+            {
+                return false;
+            }
+
+            // Read output asynchronously
+            var outputTask = proc.StandardOutput.ReadToEndAsync();
+            var errorTask = proc.StandardError.ReadToEndAsync();
+
+            using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            cts.CancelAfter(TimeSpan.FromMinutes(10)); // 10 minute timeout
+
+            try
+            {
+                await Task.Run(() => proc.WaitForExit(), cts.Token).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                try { proc.Kill(); } catch { }
+                throw;
+            }
+
+            var output = await outputTask.ConfigureAwait(false);
+            var error = await errorTask.ConfigureAwait(false);
+
+            if (proc.ExitCode != 0)
+            {
+                Debug.WriteLine($"[SshFileSyncService] tar+ssh failed with exit code {proc.ExitCode}: {error}");
+                return false;
+            }
+
+            return true;
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            Debug.WriteLine($"[SshFileSyncService] tar+ssh error: {ex.Message}");
+            return false;
+        }
     }
 
     /// <summary>
