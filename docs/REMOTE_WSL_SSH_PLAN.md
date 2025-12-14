@@ -8,7 +8,128 @@ This document proposes an implementation plan to add **WSL** and **SSH remote** 
 - Run and debug remote binaries
 - Run rust-analyzer remotely while keeping VS editor navigation and diagnostics working
 
-It is intentionally **design-only** (no implementation).
+~~It is intentionally **design-only** (no implementation).~~ **Now in implementation phase.**
+
+---
+
+## Implementation Guidelines (Performance-First)
+
+**Primary Optimization Target: Execution Speed over Memory Usage**
+
+The following principles guide implementation decisions:
+
+### 1. Path Operations - Hot Path Optimization
+
+```csharp
+// ✅ GOOD: Pre-allocate string builders, use Span<char> where possible
+public readonly struct RemotePath
+{
+    // Use ReadOnlySpan for parsing to avoid allocations
+    public static bool TryParse(ReadOnlySpan<char> path, TargetKind kind, out RemotePath result);
+    
+    // Cache computed values
+    private readonly int _lastSeparatorIndex; // Pre-computed for GetFileName/GetDirectoryName
+}
+
+// ❌ AVOID: Multiple string allocations in hot paths
+public RemotePath GetDirectoryName() =>
+    new RemotePath(string.Join("/", _path.Split('/').SkipLast(1)), Kind); // Creates arrays!
+    
+// ✅ PREFER: Direct span-based parsing
+public RemotePath GetDirectoryName()
+{
+    var span = _path.AsSpan();
+    var lastSlash = span.LastIndexOf('/');
+    return lastSlash > 0 ? new RemotePath(_path.Substring(0, lastSlash), Kind) : this;
+}
+```
+
+### 2. Process Execution - Minimize Shell Overhead
+
+```csharp
+// ✅ GOOD: Direct wsl.exe invocation with pre-built argument array
+private static readonly string WslExePath = @"C:\Windows\System32\wsl.exe"; // Avoid PATH lookup
+
+// ✅ GOOD: Use ArrayPool for argument building
+var argsBuffer = ArrayPool<string>.Shared.Rent(16);
+try { /* build args */ }
+finally { ArrayPool<string>.Shared.Return(argsBuffer); }
+
+// ❌ AVOID: String interpolation in hot loops
+wslArgs.Add($"{kv.Key}={kv.Value}"); // Creates intermediate strings
+
+// ✅ PREFER: StringBuilder or direct concatenation
+var sb = _stringBuilderPool.Get();
+sb.Append(kv.Key).Append('=').Append(kv.Value);
+```
+
+### 3. Path Mapping - Caching Strategy
+
+```csharp
+// ✅ GOOD: Cache computed UNC prefixes and common paths
+public class WslPathMapper : IPathMapper
+{
+    private readonly string _uncPrefix;
+    private readonly int _uncPrefixLength;
+    
+    // Cache for frequently accessed paths (workspace root, target dir)
+    private readonly ConcurrentDictionary<int, PathEx> _remoteToLocalCache;
+    private readonly ConcurrentDictionary<int, RemotePath> _localToRemoteCache;
+}
+```
+
+### 4. LSP Message Processing - Streaming
+
+```csharp
+// ✅ GOOD: Process JSON tokens in-place without full deserialization
+// Use Utf8JsonReader for zero-allocation parsing where possible
+
+// ✅ GOOD: Reuse JObject instances via pooling for URI rewriting
+private readonly ObjectPool<JObject> _jsonObjectPool;
+
+// ❌ AVOID: Deep cloning entire LSP messages
+var obj = (JObject)token.DeepClone(); // Expensive!
+
+// ✅ PREFER: In-place modification with selective cloning
+private JToken RewriteUrisInPlace(JToken token, bool toRemote);
+```
+
+### 5. Async/Concurrency - ValueTask and Pooling
+
+```csharp
+// ✅ GOOD: Use ValueTask for sync-completion paths
+public ValueTask<bool> FileExistsAsync(RemotePath path, CancellationToken ct)
+{
+    // Return cached result synchronously when available
+    if (_fileExistsCache.TryGetValue(path, out var exists))
+        return new ValueTask<bool>(exists);
+    
+    return new ValueTask<bool>(FileExistsAsyncCore(path, ct));
+}
+
+// ✅ GOOD: ConfigureAwait(false) for all library code
+await ctx.ExecuteAsync(...).ConfigureAwait(false);
+```
+
+### 6. Memory Allocation Budgets
+
+| Component | Allocation Target | Strategy |
+|-----------|------------------|----------|
+| Path operations | Zero-alloc for cache hits | Hash-based caching |
+| WSL command building | < 5 allocations per call | StringBuilder pool |
+| LSP URI rewriting | < 3 allocations per message | In-place modification |
+| Test discovery | O(n) where n = test count | Streaming JSON parse |
+
+### 7. Benchmarking Requirements
+
+Before merging each phase, measure:
+
+1. **Path mapping latency** - Target: < 100ns for cache hit, < 1μs for cache miss
+2. **WSL command startup** - Target: < 50ms overhead vs direct wsl.exe
+3. **LSP message rewrite** - Target: < 10μs per message
+4. **Memory per workspace** - Target: < 5MB additional for WSL target
+
+Use BenchmarkDotNet in unit test project for regression tracking.
 
 ---
 
