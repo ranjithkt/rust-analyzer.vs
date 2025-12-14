@@ -38,20 +38,27 @@ public class FileScanner : IFileScanner, IFileScannerUpToDateCheck
     public async Task<T> ScanContentAsync<T>(string filePath, CancellationToken cancellationToken)
         where T : class
     {
+        System.Diagnostics.Debug.WriteLine($"[FileScanner] ScanContentAsync called for: {filePath}, Type: {typeof(T).Name}");
+
         var package = await _mds.GetContainingPackageAsync((PathEx)filePath, cancellationToken);
         if (package == null)
         {
+            System.Diagnostics.Debug.WriteLine($"[FileScanner] Package is null for: {filePath}");
             return null;
         }
+
+        System.Diagnostics.Debug.WriteLine($"[FileScanner] Package found: {package.Name}, ManifestPath: {package.ManifestPath}, IsPackage: {package.IsPackage}");
 
         if (typeof(T) == FileScannerTypeConstants.FileDataValuesType)
         {
             var ret = GetFileDataValues(package, (PathEx)filePath);
+            System.Diagnostics.Debug.WriteLine($"[FileScanner] FileDataValues count: {ret.Count}");
             return await Task.FromResult((T)(IReadOnlyCollection<FileDataValue>)ret);
         }
         else if (typeof(T) == FileScannerTypeConstants.FileReferenceInfoType)
         {
             var ret = GetFileReferenceInfos(package, (PathEx)filePath);
+            System.Diagnostics.Debug.WriteLine($"[FileScanner] FileReferenceInfos count: {ret.Count}");
             return await Task.FromResult((T)(IReadOnlyCollection<FileReferenceInfo>)ret);
         }
         else
@@ -91,13 +98,28 @@ public class FileScanner : IFileScanner, IFileScannerUpToDateCheck
         var allFileDataValues = new List<FileDataValue>();
         var targetKind = GetCurrentTargetKind();
 
-        // For binaries.
-        if (package.ManifestPath == filePath)
+        System.Diagnostics.Debug.WriteLine($"[FileScanner.GetFileDataValues] filePath={filePath}");
+        System.Diagnostics.Debug.WriteLine($"[FileScanner.GetFileDataValues] package.ManifestPath={package.ManifestPath}");
+        System.Diagnostics.Debug.WriteLine($"[FileScanner.GetFileDataValues] ManifestPath==filePath: {package.ManifestPath == filePath}");
+
+        // For binaries - use normalized path comparison for WSL paths
+        // WSL paths can be \\wsl$\ or \\wsl.localhost\ - both should match
+        var isManifestMatch = PathsMatchForWsl(package.ManifestPath, filePath);
+        System.Diagnostics.Debug.WriteLine($"[FileScanner.GetFileDataValues] Normalized match: {isManifestMatch}");
+
+        if (isManifestMatch)
         {
+            System.Diagnostics.Debug.WriteLine($"[FileScanner.GetFileDataValues] IsPackage: {package.IsPackage}");
+
             if (package.IsPackage)
             {
-                foreach (var target in package.GetTargets().Where(t => t.IsRunnable))
+                var runnableTargets = package.GetTargets().Where(t => t.IsRunnable).ToList();
+                System.Diagnostics.Debug.WriteLine($"[FileScanner.GetFileDataValues] Runnable targets: {runnableTargets.Count}");
+
+                foreach (var target in runnableTargets)
                 {
+                    System.Diagnostics.Debug.WriteLine($"[FileScanner.GetFileDataValues] Creating debug config for target: {target.QualifiedTargetFileName}");
+
                     var launchSettings = new PropertySettings
                     {
                         [LaunchConfigurationConstants.NameKey] = target.QualifiedTargetFileName,
@@ -200,8 +222,8 @@ public class FileScanner : IFileScanner, IFileScannerUpToDateCheck
         var allFileRefInfos = new List<FileReferenceInfo>();
         var targetKind = GetCurrentTargetKind();
 
-        // For binaries.
-        if (package.ManifestPath == filePath && package.IsPackage)
+        // For binaries - use normalized path comparison for WSL paths
+        if (PathsMatchForWsl(package.ManifestPath, filePath) && package.IsPackage)
         {
             var targets = package.GetTargets();
 
@@ -233,5 +255,49 @@ public class FileScanner : IFileScanner, IFileScannerUpToDateCheck
         allFileRefInfos.AddRange(forExamples);
 
         return allFileRefInfos;
+    }
+
+    /// <summary>
+    /// Compares two paths, normalizing WSL path prefixes (\\wsl$ vs \\wsl.localhost).
+    /// Both formats refer to the same location and should be treated as equal.
+    /// </summary>
+    private static bool PathsMatchForWsl(PathEx path1, PathEx path2)
+    {
+        string p1 = path1;
+        string p2 = path2;
+
+        // Quick check - if they're equal, return true
+        if (p1.Equals(p2, StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
+        // Normalize WSL path prefixes
+        p1 = NormalizeWslPath(p1);
+        p2 = NormalizeWslPath(p2);
+
+        return p1.Equals(p2, StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>
+    /// Normalizes WSL UNC paths by converting \\wsl.localhost\ to \\wsl$\.
+    /// </summary>
+    private static string NormalizeWslPath(string path)
+    {
+        if (string.IsNullOrEmpty(path))
+        {
+            return path;
+        }
+
+        // Convert \\wsl.localhost\ to \\wsl$\ for consistent comparison
+        const string wslLocalhostPrefix = @"\\wsl.localhost\";
+        const string wslDollarPrefix = @"\\wsl$\";
+
+        if (path.StartsWith(wslLocalhostPrefix, StringComparison.OrdinalIgnoreCase))
+        {
+            return wslDollarPrefix + path.Substring(wslLocalhostPrefix.Length);
+        }
+
+        return path;
     }
 }

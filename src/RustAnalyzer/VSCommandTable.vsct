@@ -61,6 +61,11 @@
       <Group guid="guidRustAnalyzerToolchainSwitcher" id="IdGToolchainListGroup" priority="0x0600">
         <Parent guid="guidRustAnalyzerToolchainSwitcher" id="IdMSwitchToolchainMenu"/>
       </Group>
+
+      <!-- Target system group on toolbar -->
+      <Group guid="guidRustAnalyzerTargetSystemCmdSet" id="IdGTargetSystem" priority="0x0100">
+        <Parent guid="guidRustAnalyzerPackage" id="IdTRustAnalyzerToolbar" />
+      </Group>
     </Groups>
 
     <Buttons>
@@ -218,9 +223,20 @@
       <Bitmap guid="guidRustAnalyzerImageCatalog" href="Resources\Rust.png" usedList="IdIRust"/>
     </Bitmaps>
   </Commands>
-  
+
   <VisibilityConstraints>
+    <!-- Show toolbar for both Solution and Open Folder workspaces -->
     <VisibilityItem guid="guidRustAnalyzerPackage" id="IdTRustAnalyzerToolbar" context="UICONTEXT_SolutionExists" />
+    <VisibilityItem guid="guidRustAnalyzerPackage" id="IdTRustAnalyzerToolbar" context="UICONTEXT_FolderOpened" />
+
+    <!-- Build commands should be visible in both contexts -->
+    <VisibilityItem guid="guidRustAnalyzerPackage" id="IdBuildAll" context="UICONTEXT_FolderOpened" />
+    <VisibilityItem guid="guidRustAnalyzerPackage" id="IdCleanAll" context="UICONTEXT_FolderOpened" />
+    <VisibilityItem guid="guidRustAnalyzerPackage" id="IdClippyAll" context="UICONTEXT_FolderOpened" />
+    <VisibilityItem guid="guidRustAnalyzerPackage" id="IdFmtAll" context="UICONTEXT_FolderOpened" />
+
+    <!-- Target system combo should be visible in Open Folder -->
+    <VisibilityItem guid="guidRustAnalyzerTargetSystemCmdSet" id="IdTargetSystemCombo" context="UICONTEXT_FolderOpened" />
   </VisibilityConstraints>
 
   <KeyBindings>
@@ -230,12 +246,29 @@
   </KeyBindings>
 
   <CommandPlacements>
+    <!-- Context menu commands for Cargo.toml right-click -->
     <CommandPlacement guid="guidRustAnalyzerPackage" id="IdCargoClippy" priority="0x0300">
       <Parent guid="guidWorkspaceExplorerToolWindowPackageCmdSet" id="idgWSE_ContextMenu_BuildDebugActions"/>
     </CommandPlacement>
     <CommandPlacement guid="guidRustAnalyzerPackage" id="IdCargoFmt" priority="0x0301">
       <Parent guid="guidWorkspaceExplorerToolWindowPackageCmdSet" id="idgWSE_ContextMenu_BuildDebugActions"/>
     </CommandPlacement>
+
+    <!-- Build commands in Workspace Explorer context menu (for Open Folder) -->
+    <CommandPlacement guid="guidRustAnalyzerPackage" id="IdBuildAll" priority="0x0200">
+      <Parent guid="guidWorkspaceExplorerToolWindowPackageCmdSet" id="idgWSE_ContextMenu_BuildDebugActions"/>
+    </CommandPlacement>
+    <CommandPlacement guid="guidRustAnalyzerPackage" id="IdCleanAll" priority="0x0201">
+      <Parent guid="guidWorkspaceExplorerToolWindowPackageCmdSet" id="idgWSE_ContextMenu_BuildDebugActions"/>
+    </CommandPlacement>
+    <CommandPlacement guid="guidRustAnalyzerPackage" id="IdClippyAll" priority="0x0202">
+      <Parent guid="guidWorkspaceExplorerToolWindowPackageCmdSet" id="idgWSE_ContextMenu_BuildDebugActions"/>
+    </CommandPlacement>
+    <CommandPlacement guid="guidRustAnalyzerPackage" id="IdFmtAll" priority="0x0203">
+      <Parent guid="guidWorkspaceExplorerToolWindowPackageCmdSet" id="idgWSE_ContextMenu_BuildDebugActions"/>
+    </CommandPlacement>
+
+    <!-- Target system combo placements -->
     <CommandPlacement guid="guidRustAnalyzerTargetSystemCmdSet" id="IdTargetSystemCombo" priority="0x0100">
       <Parent guid="guidRustAnalyzerTargetSystemCmdSet" id="IdGTargetSystem"/>
     </CommandPlacement>
@@ -260,6 +293,9 @@
   </CommandPlacements>
 
   <Symbols>
+    <!-- UI Context GUIDs for visibility constraints -->
+    <GuidSymbol name="UICONTEXT_FolderOpened" value="{6A8A7E9B-85C1-4C25-8EBD-9A8E3DF3C0A2}" />
+
     <GuidSymbol name="guidRustAnalyzerImageCatalog" value="{9cc00aac-3dd7-49a7-9c33-502dde9199f7}">
       <IDSymbol name="IdIRust" value="1"/>
     </GuidSymbol>
