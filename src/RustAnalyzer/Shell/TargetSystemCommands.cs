@@ -10,6 +10,7 @@ using Community.VisualStudio.Toolkit;
 using EnsureThat;
 using KS.RustAnalyzer.Infrastructure;
 using KS.RustAnalyzer.Remote;
+using KS.RustAnalyzer.TestAdapter;
 using KS.RustAnalyzer.TestAdapter.Common;
 using Microsoft.VisualStudio.Shell;
 
@@ -335,6 +336,26 @@ public static class TargetSystemStore
 [Command(PackageGuids.guidRustAnalyzerTargetSystemCmdSetString, PackageIds.IdTargetSystemCombo)]
 public sealed class TargetSystemComboCommand : BaseRustAnalyzerCommand<TargetSystemComboCommand>
 {
+    protected override bool IsCommandActive()
+    {
+        ThreadHelper.ThrowIfNotOnUIThread();
+
+        var workspaceRoot = CmdServices.GetWorkspaceRoot();
+        if (workspaceRoot == null || !CmdServices.IsIdeInDesignMode())
+        {
+            return false;
+        }
+
+        // For WSL workspaces, always show the target combo
+        if (WslPathMapper.TryGetDistroName(workspaceRoot.Value, out _))
+        {
+            return true;
+        }
+
+        // For local workspaces, check if there's a Cargo.toml at the root
+        return (workspaceRoot.Value + Constants.ManifestFileName2).FileExists();
+    }
+
     protected override void ExecuteCore(object sender, OleMenuCmdEventArgs eventArgs)
     {
         EnsureArg.IsNotNull(eventArgs);
@@ -361,6 +382,26 @@ public sealed class TargetSystemComboCommand : BaseRustAnalyzerCommand<TargetSys
 [Command(PackageGuids.guidRustAnalyzerTargetSystemCmdSetString, PackageIds.IdTargetSystemComboGetList)]
 public sealed class TargetSystemComboGetListCommand : BaseRustAnalyzerCommand<TargetSystemComboGetListCommand>
 {
+    protected override bool IsCommandActive()
+    {
+        ThreadHelper.ThrowIfNotOnUIThread();
+
+        var workspaceRoot = CmdServices.GetWorkspaceRoot();
+        if (workspaceRoot == null || !CmdServices.IsIdeInDesignMode())
+        {
+            return false;
+        }
+
+        // For WSL workspaces, always show the target combo
+        if (WslPathMapper.TryGetDistroName(workspaceRoot.Value, out _))
+        {
+            return true;
+        }
+
+        // For local workspaces, check if there's a Cargo.toml at the root
+        return (workspaceRoot.Value + Constants.ManifestFileName2).FileExists();
+    }
+
     protected override void ExecuteCore(object sender, OleMenuCmdEventArgs eventArgs)
     {
         ThreadHelper.ThrowIfNotOnUIThread();
