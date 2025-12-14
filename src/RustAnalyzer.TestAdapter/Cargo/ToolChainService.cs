@@ -61,16 +61,8 @@ public sealed class ToolchainService : IToolchainService
     {
         bool success;
 
-        // #region agent log H1-H5: Entry point instrumentation
-        try { System.IO.File.AppendAllText(@"c:\Repos3\rust-analyzer.vs\.cursor\debug.log", $"{{\"ts\":{DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()},\"loc\":\"ToolchainService:Entry\",\"hyp\":\"H1-H5\",\"kind\":\"{executionContext?.Kind}\",\"mapper\":\"{pathMapper?.GetType().Name}\",\"manifest\":\"{bti.ManifestPath}\"}}\n"); } catch { }
-        // #endregion
-
         if (executionContext != null && executionContext.Kind != TargetKind.Local)
         {
-            // #region agent log H5: Check if LocalSync mode
-            try { System.IO.File.AppendAllText(@"c:\Repos3\rust-analyzer.vs\.cursor\debug.log", $"{{\"ts\":{DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()},\"loc\":\"ToolchainService:RemoteCheck\",\"hyp\":\"H5\",\"isSsh\":{(executionContext.Kind == TargetKind.Ssh).ToString().ToLower()},\"isLocalSync\":{(pathMapper is LocalToRemoteSyncMapper).ToString().ToLower()}}}\n"); } catch { }
-            // #endregion
-
             // For SSH targets in LocalSync mode, sync files first
             if (executionContext.Kind == TargetKind.Ssh && pathMapper is LocalToRemoteSyncMapper syncMapper)
             {
@@ -91,10 +83,6 @@ public sealed class ToolchainService : IToolchainService
 
                         // Update mapper to use the correct common root
                         syncMapper.SetCommonLocalRoot(commonRoot);
-
-                        // #region agent log: Common root set
-                        try { System.IO.File.AppendAllText(@"c:\Repos3\rust-analyzer.vs\.cursor\debug.log", $"{{\"ts\":{DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()},\"loc\":\"ToolchainService:CommonRootSet\",\"hyp\":\"H1\",\"commonRoot\":\"{commonRoot.Replace("\\", "\\\\")}\",\"newRemoteRoot\":\"{syncMapper.RemoteRoot}\"}}\n"); } catch { }
-                        // #endregion
                     }
                 }
 
@@ -110,10 +98,6 @@ public sealed class ToolchainService : IToolchainService
                 syncRedirector.WriteLineWithoutProcessing($"  Note: Path dependencies from Cargo.toml will be synced automatically");
                 syncRedirector.WriteLineWithoutProcessing(string.Empty);
 
-                // #region agent log H1-H4: Before sync
-                try { System.IO.File.AppendAllText(@"c:\Repos3\rust-analyzer.vs\.cursor\debug.log", $"{{\"ts\":{DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()},\"loc\":\"ToolchainService:BeforeSync\",\"hyp\":\"H1-H4\",\"local\":\"{syncMapper.LocalRoot}\",\"remote\":\"{syncMapper.RemoteRoot}\",\"conn\":\"{syncMapper.ConnectionInfo.DisplayName}\"}}\n"); } catch { }
-                // #endregion
-
                 // Sync project AND all path dependencies from Cargo.toml
                 var syncResult = await _syncService.SyncProjectWithDependenciesAsync(
                     syncMapper.LocalRoot,
@@ -121,10 +105,6 @@ public sealed class ToolchainService : IToolchainService
                     syncMapper.ConnectionInfo,
                     progress: null,
                     ct).ConfigureAwait(false);
-
-                // #region agent log H1-H4: After sync
-                try { System.IO.File.AppendAllText(@"c:\Repos3\rust-analyzer.vs\.cursor\debug.log", $"{{\"ts\":{DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()},\"loc\":\"ToolchainService:AfterSync\",\"hyp\":\"H1-H4\",\"success\":{syncResult.Success.ToString().ToLower()},\"files\":{syncResult.FilesSynced},\"err\":\"{syncResult.ErrorMessage ?? ""}\"}}\n"); } catch { }
-                // #endregion
 
                 if (!syncResult.Success)
                 {
@@ -175,33 +155,20 @@ public sealed class ToolchainService : IToolchainService
                 ct: ct).ConfigureAwait(false);
         }
 
-        // #region agent log: Build result
-        try { System.IO.File.AppendAllText(@"c:\Repos3\rust-analyzer.vs\.cursor\debug.log", $"{{\"ts\":{DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()},\"loc\":\"ToolchainService:BuildResult\",\"hyp\":\"H6\",\"success\":{success.ToString().ToLower()}}}\n"); } catch { }
-        // #endregion
-
         if (success)
         {
             // Skip test container setup for remote builds (LocalSync mode)
             // The target directory is on the remote machine, not locally
             if (executionContext != null && executionContext.Kind != TargetKind.Local && pathMapper is LocalToRemoteSyncMapper)
             {
-                // #region agent log: Skip test containers for remote
-                try { System.IO.File.AppendAllText(@"c:\Repos3\rust-analyzer.vs\.cursor\debug.log", $"{{\"ts\":{DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()},\"loc\":\"ToolchainService:SkipTestContainers\",\"hyp\":\"H6\",\"reason\":\"LocalSync mode - target directory is remote\"}}\n"); } catch { }
-                // #endregion
+                // Skip test container setup for remote builds (LocalSync mode)
+                // The target directory is on the remote machine, not locally
             }
             else
             {
                 try
                 {
-                    // #region agent log: GetWorkspace start
-                    try { System.IO.File.AppendAllText(@"c:\Repos3\rust-analyzer.vs\.cursor\debug.log", $"{{\"ts\":{DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()},\"loc\":\"ToolchainService:GetWorkspaceStart\",\"hyp\":\"H6\"}}\n"); } catch { }
-                    // #endregion
-
                     var w = await GetWorkspaceAsync(bti.ManifestPath, executionContext, pathMapper, ct).ConfigureAwait(false);
-
-                    // #region agent log: GetWorkspace done
-                    try { System.IO.File.AppendAllText(@"c:\Repos3\rust-analyzer.vs\.cursor\debug.log", $"{{\"ts\":{DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()},\"loc\":\"ToolchainService:GetWorkspaceDone\",\"hyp\":\"H6\",\"packages\":{w?.Packages?.Count ?? 0}}}\n"); } catch { }
-                    // #endregion
 
                     var testContainers = w.Packages.SelectMany(p => p.GetTestContainers(bti.Profile));
                     w.TargetDirectory.MakeProfilePath(bti.Profile).CleanTestContainers(testContainers.Select(x => x.Container));
@@ -209,11 +176,8 @@ public sealed class ToolchainService : IToolchainService
                         .Select(x => x.Container.WriteTestContainerAsync(x.Target.Parent.ManifestPath, w.TargetDirectory, bti.AdditionalTestDiscoveryArguments, bti.AdditionalTestExecutionArguments, bti.TestExecutionEnvironment, bti.Profile, Array.Empty<PathEx>(), ct));
                     await Task.WhenAll(tasks).ConfigureAwait(false);
                 }
-                catch (Exception ex)
+                catch
                 {
-                    // #region agent log: GetWorkspace failed
-                    try { System.IO.File.AppendAllText(@"c:\Repos3\rust-analyzer.vs\.cursor\debug.log", $"{{\"ts\":{DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()},\"loc\":\"ToolchainService:GetWorkspaceFailed\",\"hyp\":\"H6\",\"err\":\"{ex.Message.Replace("\\", "\\\\").Replace("\"", "\\\"")}\"}}\n"); } catch { }
-                    // #endregion
                     throw;
                 }
             }
@@ -345,21 +309,11 @@ public sealed class ToolchainService : IToolchainService
                 var args = new[] { "metadata", "--no-deps", "--format-version", "1", "--manifest-path", remoteManifestPath, "--offline" };
                 var remoteWorkingDir = pathMapper.MapToRemote(manifestPath.GetDirectoryName());
 
-                // #region agent log: cargo metadata call
-                try { System.IO.File.AppendAllText(@"c:\Repos3\rust-analyzer.vs\.cursor\debug.log", $"{{\"ts\":{DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()},\"loc\":\"ToolchainService:CargoMetadata\",\"hyp\":\"H6\",\"manifest\":\"{remoteManifestPath.Replace("$", "").Replace("\\", "\\\\")}\",\"workDir\":\"{remoteWorkingDir}\"}}\n"); } catch { }
-                // #endregion
-
                 var result = await executionContext.ExecuteAndCaptureAsync(
                     executionContext.CargoCommand,
                     args,
                     remoteWorkingDir,
                     ct).ConfigureAwait(false);
-
-                // #region agent log: cargo metadata result
-                var firstLine = result != null && result.Length > 0 ? result[0] : "";
-                var previewLen = Math.Min(100, firstLine.Length);
-                try { System.IO.File.AppendAllText(@"c:\Repos3\rust-analyzer.vs\.cursor\debug.log", $"{{\"ts\":{DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()},\"loc\":\"ToolchainService:CargoMetadataResult\",\"hyp\":\"H6\",\"lines\":{result?.Length ?? 0},\"preview\":\"{firstLine.Substring(0, previewLen).Replace("\\", "\\\\").Replace("\"", "\\\"")}\"}}\n"); } catch { }
-                // #endregion
 
                 var json = string.Join(string.Empty, result);
                 var rawWorkspace = JsonConvert.DeserializeObject<RawWorkspace>(json);
@@ -693,10 +647,6 @@ public sealed class ToolchainService : IToolchainService
             null, // environment
             outputSink,
             ct).ConfigureAwait(false);
-
-        // #region agent log: Remote execution result
-        try { System.IO.File.AppendAllText(@"c:\Repos3\rust-analyzer.vs\.cursor\debug.log", $"{{\"ts\":{DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()},\"loc\":\"ToolchainService:RemoteExecResult\",\"hyp\":\"H7\",\"opName\":\"{opName}\",\"exitCode\":{result.ExitCode}}}\n"); } catch { }
-        // #endregion
 
         if (result.ExitCode == 0)
         {

@@ -269,16 +269,8 @@ public sealed class SshFileSyncService : ISshFileSyncService
             var allPaths = new List<string> { (string)localRoot };
             allPaths.AddRange(dependencies.Select(d => (string)d.AbsoluteLocalPath));
 
-            // #region agent log H4: Dependencies found
-            try { System.IO.File.AppendAllText(@"c:\Repos3\rust-analyzer.vs\.cursor\debug.log", $"{{\"ts\":{DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()},\"loc\":\"SshFileSyncService:DepsFound\",\"hyp\":\"H4\",\"count\":{dependencies.Count},\"deps\":\"{string.Join(";", dependencies.Select(d => d.RelativePath))}\"}}\n"); } catch { }
-            // #endregion
-
             // Find the common ancestor of all paths - this preserves relative path structure
             var commonRoot = FindCommonAncestor(allPaths);
-
-            // #region agent log: Common root found
-            try { System.IO.File.AppendAllText(@"c:\Repos3\rust-analyzer.vs\.cursor\debug.log", $"{{\"ts\":{DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()},\"loc\":\"SshFileSyncService:CommonRoot\",\"hyp\":\"H1\",\"commonRoot\":\"{commonRoot.Replace("\\", "\\\\")}\"}}\n"); } catch { }
-            // #endregion
 
             // Calculate remote sync base - use $HOME/vs-sync as base
             var remoteBase = "$HOME/vs-sync";
@@ -314,10 +306,6 @@ public sealed class SshFileSyncService : ISshFileSyncService
                 // Calculate remote path by preserving structure relative to common root
                 var depRelativePath = GetRelativePathFromRoot(commonRoot, depLocalPath);
                 var depRemotePath = new RemotePath($"{remoteBase}/{depRelativePath}", TargetKind.Ssh);
-
-                // #region agent log: Syncing dependency
-                try { System.IO.File.AppendAllText(@"c:\Repos3\rust-analyzer.vs\.cursor\debug.log", $"{{\"ts\":{DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()},\"loc\":\"SshFileSyncService:SyncDep\",\"hyp\":\"H1\",\"local\":\"{depLocalPath.Replace("\\", "\\\\")}\",\"remote\":\"{depRemotePath}\"}}\n"); } catch { }
-                // #endregion
 
                 // Sync the dependency
                 var depResult = await SyncToRemoteAsync(
@@ -663,10 +651,6 @@ public sealed class SshFileSyncService : ISshFileSyncService
     {
         EnsureToolsChecked();
 
-        // #region agent log H2: Tool selection
-        try { System.IO.File.AppendAllText(@"c:\Repos3\rust-analyzer.vs\.cursor\debug.log", $"{{\"ts\":{DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()},\"loc\":\"SshFileSyncService:ToolCheck\",\"hyp\":\"H2\",\"rsync\":{_rsyncAvailable?.ToString().ToLower() ?? "null"},\"tar\":{_tarAvailable?.ToString().ToLower() ?? "null"},\"local\":\"{localDir}\",\"remote\":\"{remoteDir}\"}}\n"); } catch { }
-        // #endregion
-
         // Try rsync first (best - incremental, supports excludes, compressed)
         if (_rsyncAvailable == true)
         {
@@ -756,10 +740,6 @@ public sealed class SshFileSyncService : ISshFileSyncService
             // Use cmd.exe to run the piped command on Windows
             var cmdArgs = $"/c tar -czf -{excludeArgs} -C \"{localPath}\" . | {sshCmd} {remoteExtractCmd}";
 
-            // #region agent log H2-H3: tar+ssh command
-            try { System.IO.File.AppendAllText(@"c:\Repos3\rust-analyzer.vs\.cursor\debug.log", $"{{\"ts\":{DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()},\"loc\":\"SshFileSyncService:TarSshCmd\",\"hyp\":\"H2-H3\",\"local\":\"{localPath.Replace("\\", "\\\\")}\",\"remote\":\"{remoteDirStr}\"}}\n"); } catch { }
-            // #endregion
-
             Debug.WriteLine($"[SshFileSyncService] tar+ssh command: cmd.exe {cmdArgs}");
 
             var psi = new ProcessStartInfo
@@ -797,10 +777,6 @@ public sealed class SshFileSyncService : ISshFileSyncService
 
             var output = await outputTask.ConfigureAwait(false);
             var error = await errorTask.ConfigureAwait(false);
-
-            // #region agent log H2: tar+ssh result
-            try { var errSnip = error?.Length > 200 ? error.Substring(0, 200) : error ?? ""; System.IO.File.AppendAllText(@"c:\Repos3\rust-analyzer.vs\.cursor\debug.log", $"{{\"ts\":{DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()},\"loc\":\"SshFileSyncService:TarSshResult\",\"hyp\":\"H2\",\"exit\":{proc.ExitCode},\"err\":\"{errSnip.Replace("\\", "\\\\").Replace("\"", "\\\"").Replace("\n", " ").Replace("\r", "")}\"}}\n"); } catch { }
-            // #endregion
 
             if (proc.ExitCode != 0)
             {

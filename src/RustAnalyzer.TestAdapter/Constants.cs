@@ -18,9 +18,15 @@ public static class Constants
     public const string ManifestFileExtension = ".toml";
     public const string RustupSettingsFileName = "settings.toml";
 
+    // Windows executables (with .exe extension)
     public const string RustUpExe = "rustup.exe";
     public const string RAExeNameNoExtension = "rust-analyzer";
     public const string CargoExe = "cargo.exe";
+
+    // Linux/remote executables (no extension)
+    public const string RustUpCommand = "rustup";
+    public const string CargoCommand = "cargo";
+    public const string RustAnalyzerCommand = "rust-analyzer";
 
     public const string ConfigurationSectionName = "rust-analyzer.vs";
     public const string RAVsVersion = "RAVsVersion";

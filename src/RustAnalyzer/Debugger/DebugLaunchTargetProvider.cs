@@ -36,6 +36,7 @@ public sealed class DebugLaunchTargetProvider : ILaunchDebugTargetProvider
     public void LaunchDebugTarget(IWorkspace workspaceContext, IServiceProvider serviceProvider, DebugLaunchActionContext debugLaunchActionContext)
     {
         L.WriteLine("[LaunchDebugTarget] ENTRY - Starting debug launch");
+
         try
         {
             var lcw = new LaunchConfigWrapper(debugLaunchActionContext.LaunchConfiguration, new TL { T = T, L = L, });
@@ -53,11 +54,13 @@ public sealed class DebugLaunchTargetProvider : ILaunchDebugTargetProvider
     public bool SupportsContext(IWorkspace workspaceContext, string targetFilePath)
     {
         L.WriteLine("[SupportsContext] Checking: {0}", targetFilePath);
+
         var mds = workspaceContext.GetService<IMetadataService>();
         var package = workspaceContext.JTF.Run(async () => await workspaceContext.GetService<IMetadataService>()?.GetContainingPackageAsync((PathEx)targetFilePath, default));
 
         var result = package != null;
         L.WriteLine("[SupportsContext] Result: {0} (Package: {1})", result, package?.FullPath ?? "null");
+
         return result;
     }
 

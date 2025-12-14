@@ -109,6 +109,21 @@ public sealed class LocalToRemoteSyncMapper : IPathMapper
     {
         string path = vsPath;
 
+        // Check if the path starts with our common local root (not just workspace root)
+        // This handles paths like C:\Repos\Rust\... when common root is C:\Repos\Rust
+        if (path.StartsWith(_commonLocalRoot, StringComparison.OrdinalIgnoreCase))
+        {
+            var relativePath = path.Substring(_commonLocalRoot.Length).TrimStart('\\', '/');
+            var linuxRelativePath = relativePath.Replace(@"\", "/");
+
+            if (string.IsNullOrEmpty(linuxRelativePath))
+            {
+                return new RemotePath(_remoteSyncBase, TargetKind.Ssh);
+            }
+
+            return new RemotePath($"{_remoteSyncBase}/{linuxRelativePath}", TargetKind.Ssh);
+        }
+
         // Check if the path starts with our local root
         if (path.StartsWith((string)_localRoot, StringComparison.OrdinalIgnoreCase))
         {

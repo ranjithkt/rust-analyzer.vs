@@ -59,20 +59,14 @@ public sealed class BuildOutputSink : IBuildOutputSink
                         throw new ArgumentOutOfRangeException(nameof(message));
                     }
                 }
-                catch (Exception ex)
+                catch
                 {
-                    // #region agent log
-                    try { System.IO.File.AppendAllText(@"c:\Repos3\rust-analyzer.vs\.cursor\debug.log", $"{{\"ts\":{DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()},\"loc\":\"BuildOutputSink:WriteLineError\",\"hyp\":\"H5\",\"err\":\"{ex.GetType().Name}: {ex.Message.Replace("\\", "\\\\").Replace("\"", "\\\"").Replace("\r", "").Replace("\n", " ")}\"}}\n"); } catch { }
-                    // #endregion
                     throw;
                 }
             }).FireAndForget();
         }
         catch (Exception e)
         {
-            // #region agent log
-            try { System.IO.File.AppendAllText(@"c:\Repos3\rust-analyzer.vs\.cursor\debug.log", $"{{\"ts\":{DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()},\"loc\":\"BuildOutputSink:WriteLineOuterError\",\"hyp\":\"H5\",\"err\":\"{e.GetType().Name}: {e.Message.Replace("\\", "\\\\").Replace("\"", "\\\"").Replace("\r", "").Replace("\n", " ")}\"}}\n"); } catch { }
-            // #endregion
             T.TrackException(e);
         }
     }

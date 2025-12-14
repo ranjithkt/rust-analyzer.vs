@@ -190,6 +190,7 @@ public class FileScanner : IFileScanner, IFileScannerUpToDateCheck
         if (package.ManifestPath == filePath && package.IsPackage)
         {
             var targets = package.GetTargets();
+
             var refInfos = package.GetProfiles()
                 .SelectMany(p => targets.Select(t => (Target: t, Profile: p)))
                 .Where(x => !x.Target.IsExample())
