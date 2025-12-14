@@ -5,6 +5,7 @@ using System.Linq;
 using System.Runtime.InteropServices;
 using System.Text.Json;
 using System.Threading;
+using System.Threading.Tasks;
 using Community.VisualStudio.Toolkit;
 using EnsureThat;
 using KS.RustAnalyzer.Infrastructure;
@@ -39,7 +40,8 @@ public static class TargetSystemStore
             {
                 _currentWorkspaceRoot = workspaceRoot;
 
-                var options = Options.GetLiveInstanceAsync().GetAwaiter().GetResult();
+                // Use Task.Run to avoid deadlock - Options.GetLiveInstanceAsync may need UI thread
+                var options = Task.Run(() => Options.GetLiveInstanceAsync()).GetAwaiter().GetResult();
                 var wslEnabled = options?.EnableWslSupport ?? false;
                 var sshEnabled = options?.EnableSshSupport ?? false;
 
@@ -59,8 +61,9 @@ public static class TargetSystemStore
                     wslEnabled,
                     sshEnabled);
 
-                // Initialize available targets synchronously to ensure they're ready
-                _service.RefreshAvailableTargetsAsync(CancellationToken.None).GetAwaiter().GetResult();
+                // Initialize available targets - use Task.Run to avoid deadlock
+                // RefreshAvailableTargetsAsync runs wsl.exe which can block
+                Task.Run(async () => await _service.RefreshAvailableTargetsAsync(CancellationToken.None)).GetAwaiter().GetResult();
 
                 System.Diagnostics.Debug.WriteLine($"[TargetSystemStore] Available targets: {string.Join(", ", _service.AvailableTargets.Select(t => t.DisplayName))}");
 
