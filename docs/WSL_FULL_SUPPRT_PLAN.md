@@ -354,3 +354,103 @@ These are the items that prevent WSL-first from being reliable and/or from worki
   - build executes remotely after sync
   - LSP stays local for LocalSync workspaces (this is intentional and already implemented in `LanguageClient`).
 
+## Code Review Verification (2025-12-14)
+
+The following issues were verified by code inspection with exact line numbers:
+
+| Issue | File | Line(s) | Finding |
+|-------|------|---------|---------|
+| MetadataService uses local cargo | `MetadataService.cs` | 140 | Calls `GetWorkspaceAsync(manifestPath, ct)` - 2-arg overload with no execution context |
+| MetadataServiceFactory has no target awareness | `MetadataServiceFactory.cs` | 26-29 | Creates MetadataService without IExecutionContext injection |
+| PreReqsCheckService is Windows-only | `PreReqsCheckService.cs` | 88-118 | Checks `cargo.exe` and `rustup.exe` on Windows paths |
+| Startup forces Windows prereqs | `RustAnalyzerPackage.cs` | 77-78 | Unconditionally runs `_preReqs.SatisfyAsync()` and `_raDownloader.InstallLatestAsync()` |
+| WslExecutionContext no streaming | `WslExecutionContext.cs` | 79-92 | Only calls `OnProcessStarted`/`OnProcessExited`, waits for completion, returns buffered output |
+| WslExecutionContext file ops broken | `WslExecutionContext.cs` | ~117 | Uses `"&&"` as arg to wsl.exe (not through shell) - this cannot work |
+| TestContainer.DebugEngines hardcoded | `TestContainer.cs` | 38 | Always `NativeOnly_guid` |
+| FileScanner uses GetPath(profile) | `FileScanner.cs` | 111, 163, 200, 215 | Uses 1-arg overload that returns `.exe` paths |
+| ToolchainServiceExtensions uses cmd.exe | `ToolChainServiceExtensions.cs` | 249 | `ProcessRunner.Run("cmd.exe", ...)` |
+| TargetSystemStore is static | `TargetSystemCommands.cs` | (static field) | Single static `_service`, not per-workspace |
+
+**Verified existing support** (already implemented):
+- `GetPath(profile, TargetKind)` overload exists (WorkspaceExtensions line 106)
+- `GetRemotePath()` for remote targets exists (WorkspaceExtensions line 123)
+- `CreateRemoteTargetFileName()` for Linux binaries exists (WorkspaceExtensions line 81)
+- Build/Clean/Clippy/Fmt remote paths exist in ToolchainService
+- LSP MiddleLayer and remote rust-analyzer startup exist
+- `RawWorkspace` + `WorkspaceFactory` pattern exists for remote cargo metadata parsing
+
+## Implementation Considerations (think holistically)
+
+### Dependency Graph (phases must be done in order)
+
+```
+Phase 0 (Target lifecycle)
+    │
+    ▼
+Phase 1 (Prereqs gating) ──┐
+    │                      │
+    ▼                      │
+Phase 2 (WSL exec fix)     │  These can be parallelized if careful
+    │                      │
+    ▼                      │
+Phase 3 (Metadata)     ◄───┘
+    │
+    ▼
+Phase 4 (Build validation)
+    │
+    ▼
+Phase 5 (LSP hardening)
+    │
+    ▼
+Phase 6 (Tests)
+    │
+    ▼
+Phase 7 (Debug - requires spike first)
+    │
+    ▼
+Phase 8 (UX polish - optional)
+```
+
+### Key Design Decisions (answer before coding)
+
+1. **How to detect WSL-first workspace?**
+   - Check if workspace root path starts with `\\wsl$\` or `\\wsl.localhost\`
+   - Use `WslPathMapper.TryGetDistroName()` which already handles this
+
+2. **How to make target context available everywhere?**
+   - `IWorkspaceContextAccessor` already exists and provides `GetCurrentTargetSystemAsync()`
+   - Need to ensure all services that need target context can access it via MEF import
+
+3. **How to avoid breaking local Windows users?**
+   - All changes must check `TargetKind` before changing behavior
+   - Default behavior (when no target selected or Local target) must remain unchanged
+   - Feature flag `EnableWslSupport` already exists in Options
+
+4. **How to handle the "no Windows toolchain" case?**
+   - Prereqs must be lazy (on-demand) not at package load
+   - When WSL workspace detected, skip Windows checks entirely
+   - Run WSL-specific checks only when WSL target is active
+
+5. **What about mixed scenarios (Windows cargo + WSL workspace)?**
+   - This is valid: user might have Windows cargo for local projects
+   - Don't fail if Windows cargo exists; just don't require it for WSL workspaces
+
+### Risk Areas (monitor closely)
+
+1. **URI correctness**: Wrong `file://` vs `file:///` will silently break navigation
+2. **Process cancellation**: Without setsid/pkill, cargo processes may orphan
+3. **Streaming**: Build JSON parser expects streaming; buffered output may timeout or fail
+4. **Debug engine selection**: Wrong GUID selection will crash or fail silently
+
+### Regression Test Checklist (run after each phase)
+
+- [ ] Open local Windows Rust project → build works
+- [ ] Open local Windows Rust project → LSP works (completion, hover, go-to-def)
+- [ ] Open local Windows Rust project → tests discover and run
+- [ ] Open local Windows Rust project → F5 debug works
+- [ ] Open WSL Rust project (after implementation) → build works
+- [ ] Open WSL Rust project → LSP works
+- [ ] Open WSL Rust project → tests discover and run
+- [ ] Open WSL Rust project → F5 debug works (Phase 7)
+- [ ] SSH LocalSync build still works (don't break existing SSH users)
+
