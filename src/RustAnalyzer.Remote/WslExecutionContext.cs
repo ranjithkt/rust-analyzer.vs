@@ -69,12 +69,22 @@ public sealed class WslExecutionContext : IExecutionContext
         // Build wsl.exe command line
         var wslArgs = BuildWslArguments(command, arguments, workingDirectory, environment);
 
+        // Create a redirector to stream output to the sink in real-time (same pattern as SshExecutionContext)
+        ProcessOutputRedirector redirector = outputSink != null
+            ? new OutputSinkRedirector(outputSink)
+            : null;
+
         using var proc = ProcessRunner.Run(
             WslExePath,
             wslArgs,
             workingDirectory: null, // wsl.exe handles this via --cd
             env: null,
-            ct);
+            visible: false,
+            redirector: redirector,
+            quoteArgs: true,
+            outputEncoding: null,
+            errorEncoding: null,
+            cancellationToken: ct);
 
         outputSink?.OnProcessStarted(proc.ProcessId);
 
@@ -116,9 +126,12 @@ public sealed class WslExecutionContext : IExecutionContext
     /// <inheritdoc/>
     public async Task<bool> FileExistsAsync(RemotePath path, CancellationToken ct)
     {
+        // Use sh -c to properly interpret shell operators like &&
+        // The path is escaped to handle spaces and special characters
+        var escapedPath = EscapeForShell((string)path);
         var result = await ExecuteAndCaptureAsync(
-            "test",
-            new[] { "-f", (string)path, "&&", "echo", "1" },
+            "sh",
+            new[] { "-c", $"test -f {escapedPath} && echo 1" },
             new RemotePath("/", TargetKind.Wsl),
             ct).ConfigureAwait(false);
 
@@ -128,9 +141,12 @@ public sealed class WslExecutionContext : IExecutionContext
     /// <inheritdoc/>
     public async Task<bool> DirectoryExistsAsync(RemotePath path, CancellationToken ct)
     {
+        // Use sh -c to properly interpret shell operators like &&
+        // The path is escaped to handle spaces and special characters
+        var escapedPath = EscapeForShell((string)path);
         var result = await ExecuteAndCaptureAsync(
-            "test",
-            new[] { "-d", (string)path, "&&", "echo", "1" },
+            "sh",
+            new[] { "-c", $"test -d {escapedPath} && echo 1" },
             new RemotePath("/", TargetKind.Wsl),
             ct).ConfigureAwait(false);
 

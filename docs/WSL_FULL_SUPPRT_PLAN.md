@@ -5,8 +5,9 @@ overview: |
 
   SSH support that already exists (current: remote build via SSH, plus additional plumbing) MUST remain supported.
 
-status: planning
+status: in_progress
 last_reviewed: 2025-12-14
+implementation_start: 2025-12-14
 assumptions:
   - Visual Studio opens WSL repos via UNC paths (\\wsl$\<distro>\... or \\wsl.localhost\<distro>\...).
   - For WSL-first, the source of truth is the Linux filesystem (ext4 in WSL2 is the primary target).
@@ -21,16 +22,16 @@ non_goals:
 todos:
   - id: wsl-metadata-remote
     content: Make workspace/package metadata discovery run cargo metadata in WSL (MetadataService must use IExecutionContext/IPathMapper)
-    status: pending
+    status: completed
   - id: startup-prereqs-gating
     content: Stop enforcing Windows cargo/rustup/rust-analyzer download at VS startup for WSL-first workspaces (make prereqs target-aware + lazy)
-    status: pending
+    status: completed
   - id: wsl-exec-streaming
     content: Fix WslExecutionContext to stream output to IProcessOutputSink (required for JSON build parsing and UX)
-    status: pending
+    status: completed
   - id: wsl-exec-fileops
     content: Fix WslExecutionContext file/dir ops (no shell operators without a shell) and add --cd fallback
-    status: pending
+    status: completed
   - id: wsl-process-cancel
     content: Implement robust WSL cancellation (setsid/pkill process group cleanup) in WslExecutionContext
     status: pending
@@ -39,7 +40,7 @@ todos:
     status: pending
   - id: file-scanner-target-aware
     content: Make FileScanner/launch target generation target-aware (no .exe assumptions for WSL)
-    status: pending
+    status: completed
   - id: test-executor-remote
     content: Add WSL test execution support in TestExecutor (run ELF tests in WSL via IExecutionContext)
     status: pending

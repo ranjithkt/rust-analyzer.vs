@@ -7,6 +7,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Community.VisualStudio.Toolkit;
 using KS.RustAnalyzer.Infrastructure;
+using KS.RustAnalyzer.Remote;
 using KS.RustAnalyzer.TestAdapter.Common;
 using Microsoft.VisualStudio;
 using Microsoft.VisualStudio.ComponentModelHost;
@@ -74,9 +75,60 @@ public sealed class RustAnalyzerPackage : ToolkitPackage
 
         await ReleaseSummaryNotification.ShowAsync(_regSettings, _tl);
         await SearchAndDisableIncompatibleExtensionsAsync();
-        await _preReqs.SatisfyAsync(cancellationToken);
-        await _raDownloader.InstallLatestAsync();
+
+        // Check if this is a WSL workspace - if so, skip Windows-specific prereqs and installer
+        // WSL workspaces use the toolchain installed in WSL, not Windows
+        var isWslWorkspace = IsWslWorkspace();
+        _tl.L?.WriteLine("Package loaded. WSL workspace: {0}", isWslWorkspace);
+
+        if (!isWslWorkspace)
+        {
+            // Only check Windows prereqs and install Windows rust-analyzer for non-WSL workspaces
+            await _preReqs.SatisfyAsync(cancellationToken);
+            await _raDownloader.InstallLatestAsync();
+        }
+        else
+        {
+            _tl.L?.WriteLine("Skipping Windows prereqs check and rust-analyzer download for WSL workspace.");
+        }
+
         await RlsUpdatedNotification.ShowAsync();
+    }
+
+    /// <summary>
+    /// Checks if the current workspace is a WSL path (e.g., \\wsl$\Ubuntu\...).
+    /// </summary>
+    private bool IsWslWorkspace()
+    {
+        ThreadHelper.ThrowIfNotOnUIThread();
+
+        try
+        {
+            // Try to get the workspace root from VS Solution service
+            var solution = GetGlobalService(typeof(SVsSolution)) as IVsSolution;
+            if (solution == null)
+            {
+                return false;
+            }
+
+            if (ErrorHandler.Failed(solution.GetSolutionInfo(out var workspaceRoot, out _, out _)))
+            {
+                return false;
+            }
+
+            if (string.IsNullOrEmpty(workspaceRoot))
+            {
+                return false;
+            }
+
+            // Check if this is a WSL UNC path
+            return WslPathMapper.TryGetDistroName(workspaceRoot, out _);
+        }
+        catch (Exception ex)
+        {
+            _tl.L?.WriteError("Error checking if workspace is WSL: {0}", ex.Message);
+            return false;
+        }
     }
 
     #region Handling incompatible extensions

@@ -5,30 +5,44 @@ using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using EnsureThat;
+using KS.RustAnalyzer.Remote;
 using KS.RustAnalyzer.TestAdapter.Common;
 
 namespace KS.RustAnalyzer.TestAdapter.Cargo;
+
+/// <summary>
+/// Delegate for providing the current target system's execution context and path mapper.
+/// Returns null for local targets.
+/// </summary>
+public delegate (IExecutionContext ExecutionContext, IPathMapper PathMapper)? TargetContextProvider();
 
 public class MetadataService : IMetadataService, IDisposable
 {
     private readonly IToolchainService _cargoService;
     private readonly PathEx _workspaceRoot;
     private readonly TL _tl;
+    private readonly TargetContextProvider _targetContextProvider;
     private readonly bool _synchronousEvents;
     private readonly SemaphoreSlim _packageCacheLocker = new(1, 1);
     private ConcurrentDictionary<PathEx, Workspace.Package> _packageCache = new();
     private bool _disposedValue;
 
     public MetadataService(IToolchainService cargoService, PathEx workspaceRoot, TL tl)
-        : this(cargoService, workspaceRoot, tl, syncEvents: false)
+        : this(cargoService, workspaceRoot, tl, targetContextProvider: null, syncEvents: false)
     {
     }
 
-    protected MetadataService(IToolchainService cargoService, PathEx workspaceRoot, TL tl, bool syncEvents = false)
+    public MetadataService(IToolchainService cargoService, PathEx workspaceRoot, TL tl, TargetContextProvider targetContextProvider)
+        : this(cargoService, workspaceRoot, tl, targetContextProvider, syncEvents: false)
+    {
+    }
+
+    protected MetadataService(IToolchainService cargoService, PathEx workspaceRoot, TL tl, TargetContextProvider targetContextProvider, bool syncEvents = false)
     {
         _cargoService = cargoService;
         _workspaceRoot = workspaceRoot;
         _tl = tl;
+        _targetContextProvider = targetContextProvider;
         _synchronousEvents = syncEvents;
         _tl.L.WriteLine("Creating MDS. Workspace root: {0}.", workspaceRoot);
         _tl.T.TrackEvent("CreatingMDS", ("WorkspaceRoot", $"{workspaceRoot}"));
@@ -137,7 +151,22 @@ public class MetadataService : IMetadataService, IDisposable
 
     private async Task<Workspace.Package> GetPackageAsyncCore(PathEx manifestPath, CancellationToken ct)
     {
-        var w = await _cargoService.GetWorkspaceAsync(manifestPath, ct);
+        Workspace w;
+
+        // Check if we have a remote target context (WSL/SSH)
+        var targetContext = _targetContextProvider?.Invoke();
+        if (targetContext.HasValue && targetContext.Value.ExecutionContext?.Kind != TargetKind.Local)
+        {
+            var (executionContext, pathMapper) = targetContext.Value;
+            _tl.L.WriteLine("GetPackageAsyncCore: Using remote execution context ({0}) for manifest: {1}", executionContext.Kind, manifestPath);
+            w = await _cargoService.GetWorkspaceAsync(manifestPath, executionContext, pathMapper, ct);
+        }
+        else
+        {
+            // Local target - use local cargo
+            w = await _cargoService.GetWorkspaceAsync(manifestPath, ct);
+        }
+
         var p = w.Packages.FirstOrDefault(p => p.ManifestPath.GetFullPath() == manifestPath.GetFullPath());
 
         Ensure.That(p).IsNotNull();

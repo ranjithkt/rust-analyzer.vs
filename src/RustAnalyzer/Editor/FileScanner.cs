@@ -4,6 +4,8 @@ using System.IO;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
+using KS.RustAnalyzer.Infrastructure;
+using KS.RustAnalyzer.Remote;
 using KS.RustAnalyzer.TestAdapter;
 using KS.RustAnalyzer.TestAdapter.Cargo;
 using KS.RustAnalyzer.TestAdapter.Common;
@@ -17,10 +19,20 @@ namespace KS.RustAnalyzer.Editor;
 public class FileScanner : IFileScanner, IFileScannerUpToDateCheck
 {
     private readonly IMetadataService _mds;
+    private readonly IWorkspaceContextAccessor _workspaceContextAccessor;
 
-    public FileScanner(IMetadataService mds)
+    public FileScanner(IMetadataService mds, IWorkspaceContextAccessor workspaceContextAccessor)
     {
         _mds = mds;
+        _workspaceContextAccessor = workspaceContextAccessor;
+    }
+
+    /// <summary>
+    /// Gets the current target kind for determining binary file extensions.
+    /// </summary>
+    private TargetKind GetCurrentTargetKind()
+    {
+        return _workspaceContextAccessor?.GetCurrentTarget()?.Kind ?? TargetKind.Local;
     }
 
     public async Task<T> ScanContentAsync<T>(string filePath, CancellationToken cancellationToken)
@@ -77,6 +89,7 @@ public class FileScanner : IFileScanner, IFileScannerUpToDateCheck
     private List<FileDataValue> GetFileDataValues(Workspace.Package package, PathEx filePath)
     {
         var allFileDataValues = new List<FileDataValue>();
+        var targetKind = GetCurrentTargetKind();
 
         // For binaries.
         if (package.ManifestPath == filePath)
@@ -108,7 +121,7 @@ public class FileScanner : IFileScanner, IFileScannerUpToDateCheck
                                 type: BuildConfigurationContext.ContextTypeGuid,
                                 name: BuildConfigurationContext.DataValueName,
                                 value: null,
-                                target: target.GetPath(profile),
+                                target: target.GetPath(profile, targetKind),
                                 context: profile));
 
                     allFileDataValues.AddRange(fileDataValuesForAllProfiles1);
@@ -159,7 +172,7 @@ public class FileScanner : IFileScanner, IFileScannerUpToDateCheck
                                 type: BuildConfigurationContext.ContextTypeGuid,
                                 name: BuildConfigurationContext.DataValueName,
                                 value: null,
-                                target: t.GetPath(profile),
+                                target: t.GetPath(profile, targetKind),
                                 context: profile));
 
                     allFileDataValues.AddRange(fileDataValuesForAllProfiles1);
@@ -182,9 +195,10 @@ public class FileScanner : IFileScanner, IFileScannerUpToDateCheck
         return allFileDataValues;
     }
 
-    private static List<FileReferenceInfo> GetFileReferenceInfos(Workspace.Package package, PathEx filePath)
+    private List<FileReferenceInfo> GetFileReferenceInfos(Workspace.Package package, PathEx filePath)
     {
         var allFileRefInfos = new List<FileReferenceInfo>();
+        var targetKind = GetCurrentTargetKind();
 
         // For binaries.
         if (package.ManifestPath == filePath && package.IsPackage)
@@ -196,8 +210,8 @@ public class FileScanner : IFileScanner, IFileScannerUpToDateCheck
                 .Where(x => !x.Target.IsExample())
                 .Select(x =>
                     new FileReferenceInfo(
-                        relativePath: x.Target.GetPathRelativeTo(x.Profile, filePath),
-                        target: x.Target.GetPath(x.Profile),
+                        relativePath: x.Target.GetPathRelativeTo(x.Profile, filePath, targetKind),
+                        target: x.Target.GetPath(x.Profile, targetKind),
                         context: x.Profile,
                         referenceType: (int)FileReferenceInfoType.Output));
 
@@ -211,8 +225,8 @@ public class FileScanner : IFileScanner, IFileScannerUpToDateCheck
             .SelectMany(t => package.GetProfiles().Select(p => (Target: t, Profile: p)))
             .Select(x =>
                 new FileReferenceInfo(
-                    relativePath: x.Target.GetPathRelativeTo(x.Profile, filePath),
-                    target: x.Target.GetPath(x.Profile),
+                    relativePath: x.Target.GetPathRelativeTo(x.Profile, filePath, targetKind),
+                    target: x.Target.GetPath(x.Profile, targetKind),
                     context: x.Profile,
                     referenceType: (int)FileReferenceInfoType.Output));
 

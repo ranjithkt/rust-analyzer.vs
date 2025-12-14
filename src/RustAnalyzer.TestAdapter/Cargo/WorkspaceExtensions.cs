@@ -139,6 +139,11 @@ public static class WorkspaceExtensions
         return (PathEx)PathExtensions.MakeRelativePath(Path.GetDirectoryName(rootPath), @this.GetPath(profile));
     }
 
+    public static PathEx GetPathRelativeTo(this Workspace.Target @this, string profile, string rootPath, TargetKind targetKind)
+    {
+        return (PathEx)PathExtensions.MakeRelativePath(Path.GetDirectoryName(rootPath), @this.GetPath(profile, targetKind));
+    }
+
     public static PathEx GetTargetPathRelativeToWorkspace(this Workspace.Target @this)
     {
         var relPath = Path.GetDirectoryName(PathExtensions.MakeRelativePath(@this.Parent.WorkspaceRoot, @this.Parent.FullPath));

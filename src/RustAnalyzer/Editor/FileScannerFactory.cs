@@ -30,6 +30,9 @@ public class FileScannerFactory : IWorkspaceProviderFactory<IFileScanner>
     [Import]
     public IPreReqsCheckService PreReqs { get; set; }
 
+    [Import]
+    public IWorkspaceContextAccessor WorkspaceContextAccessor { get; set; }
+
     public IFileScanner CreateProvider(IWorkspace workspaceContext)
     {
         T.TrackEvent(
@@ -37,6 +40,6 @@ public class FileScannerFactory : IWorkspaceProviderFactory<IFileScanner>
             new[] { ("Location", workspaceContext.Location) });
         L.WriteLine("Creating {0}.", GetType().Name);
 
-        return new FileScanner(workspaceContext.GetService<IMetadataService>());
+        return new FileScanner(workspaceContext.GetService<IMetadataService>(), WorkspaceContextAccessor);
     }
 }
