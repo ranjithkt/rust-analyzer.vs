@@ -91,11 +91,11 @@ public class FileScanner : IFileScanner, IFileScannerUpToDateCheck
     {
         var path = (PathEx)filePath;
         var ext = path.GetExtension();
-        var fileName = path.GetFileName();
+        var fileName = (string)path.GetFileName();
 
         // Check for .rs files or specifically Cargo.toml (not just any .toml)
         var isRustFile = ext.Equals(Constants.RustFileExtension);
-        var isCargoToml = fileName.Equals(Constants.ManifestFileName2, StringComparison.OrdinalIgnoreCase);
+        var isCargoToml = fileName.Equals(Constants.ManifestFileName, StringComparison.OrdinalIgnoreCase);
 
         return (isRustFile || isCargoToml).ToTask();
     }
