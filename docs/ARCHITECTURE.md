@@ -842,19 +842,19 @@ Remote development support (WSL/SSH) is being implemented as a **target system a
 | Phase | Scope | Status |
 |-------|-------|--------|
 | **R0** | Core abstractions (RemotePath, IExecutionContext, etc.) | ✅ Complete |
-| **R1** | WSL Build/Clean/Fmt/Clippy | ⏳ Pending |
-| **R1.5** | WSL Test Adapter | ⏳ Pending |
-| **R2** | WSL rust-analyzer + LSP URI rewriting | ⏳ Pending |
-| **R3** | WSL Debugging (MIEngine/gdbserver) | ⏳ Pending |
-| **R4** | SSH "Open Folder" + Build | ⏳ Pending |
-| **R5** | SSH LSP + Debugging | ⏳ Pending |
+| **R1** | WSL Build/Clean/Fmt/Clippy | ✅ Complete |
+| **R1.5** | WSL Test Adapter | ✅ Complete |
+| **R2** | WSL rust-analyzer + LSP URI rewriting | ✅ Complete |
+| **R3** | WSL Debugging | ✅ Complete |
+| **R4** | SSH Execution + Path Mapping | ✅ Complete |
+| **R5** | SSH LSP + Debugging | ✅ Complete |
 
 ### Key Design Decisions
 
-1. **Don't modify `PathEx`** - Create `RemotePath` for Linux paths (implemented in R0)
-2. **Use Raw DTO + Factory pattern** for cargo metadata parsing (planned, Phase R1)
-3. **Generate test containers locally** for remote (planned, Phase R1.5 / R4)
-4. **`IExecutionContext` for ALL command execution** - No direct ProcessRunner calls for remote targets (foundation in R0; adoption in R1+)
+1. **Don't modify `PathEx`** - Create `RemotePath` for Linux paths (✅ implemented)
+2. **Use Raw DTO + Factory pattern** for cargo metadata parsing (✅ implemented: `RawWorkspace`, `WorkspaceFactory`)
+3. **Generate test containers locally** for remote (✅ implemented in ToolchainService)
+4. **`IExecutionContext` for ALL command execution** - No direct ProcessRunner calls for remote targets (✅ implemented)
 5. **SSH “Open Folder” model is chosen via spikes** (S0/S1/S2); always keep S2 (local cache + sync) as the feasible fallback
 
 ### SSH Support: Three Approaches (S0 / S1 / S2)

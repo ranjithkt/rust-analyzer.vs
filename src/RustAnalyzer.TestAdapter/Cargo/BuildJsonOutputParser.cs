@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Text.RegularExpressions;
+using KS.RustAnalyzer.Remote;
 using KS.RustAnalyzer.TestAdapter.Common;
 using Newtonsoft.Json.Linq;
 using static KS.RustAnalyzer.TestAdapter.Common.DetailedBuildMessage;
@@ -33,7 +34,15 @@ public static class BuildJsonOutputParser
     private static readonly Regex CompilerArtifactMessageCracker2 =
         new(@"^(.*)\+(.*)@(.*)$", RegexOptions.Compiled);
 
-    public static BuildMessage[] Parse(PathEx workspaceRoot, string jsonLine, TL tl)
+    /// <summary>
+    /// Parses a cargo JSON output line.
+    /// </summary>
+    /// <param name="workspaceRoot">The workspace root path (VS-visible).</param>
+    /// <param name="jsonLine">The JSON line to parse.</param>
+    /// <param name="tl">Telemetry and logging.</param>
+    /// <param name="pathMapper">Optional path mapper for remote targets. Null for local.</param>
+    /// <returns>Parsed build messages.</returns>
+    public static BuildMessage[] Parse(PathEx workspaceRoot, string jsonLine, TL tl, IPathMapper pathMapper = null)
     {
         dynamic obj;
         try
@@ -55,7 +64,7 @@ public static class BuildJsonOutputParser
             }
             else if (obj.reason == "compiler-message")
             {
-                return ParseCompilerMessage(workspaceRoot, obj);
+                return ParseCompilerMessage(workspaceRoot, obj, pathMapper);
             }
         }
         catch (Exception e)
@@ -68,17 +77,17 @@ public static class BuildJsonOutputParser
         return Array.Empty<BuildMessage>();
     }
 
-    private static BuildMessage[] ParseCompilerMessage(PathEx workspaceRoot, dynamic obj)
+    private static BuildMessage[] ParseCompilerMessage(PathEx workspaceRoot, dynamic obj, IPathMapper pathMapper)
     {
         if (obj.message.spans == null || obj.message.spans.Count == 0)
         {
-            return new BuildMessage[] { CreateBuildMessage(workspaceRoot, obj) };
+            return new BuildMessage[] { CreateBuildMessage(workspaceRoot, obj, pathMapper) };
         }
 
         return (obj.message.spans as IEnumerable<dynamic>).Select(
             s =>
             {
-                DetailedBuildMessage msg = CreateBuildMessage(workspaceRoot, obj, s.file_name, s.line_start, s.column_start);
+                DetailedBuildMessage msg = CreateBuildMessage(workspaceRoot, obj, pathMapper, s.file_name, s.line_start, s.column_start);
                 return msg;
             }).ToArray();
     }
@@ -91,7 +100,7 @@ public static class BuildJsonOutputParser
             : defaultValue;
     }
 
-    private static DetailedBuildMessage CreateBuildMessage(PathEx workspaceRoot, dynamic obj, dynamic fileInfo = null, dynamic lineInfo = null, dynamic colInfo = null)
+    private static DetailedBuildMessage CreateBuildMessage(PathEx workspaceRoot, dynamic obj, IPathMapper pathMapper, dynamic fileInfo = null, dynamic lineInfo = null, dynamic colInfo = null)
     {
         var msg = new DetailedBuildMessage
         {
@@ -100,26 +109,86 @@ public static class BuildJsonOutputParser
             File = obj.target.src_path.Value,
             HelpKeyword = GetMessageCode(obj.message),
             LineNumber = GetIntValue(lineInfo, 1),
-            ProjectFile = GetProjectFile(obj),
+            ProjectFile = GetProjectFile(obj, pathMapper),
             SubCategory = null,
             TaskText = obj.message.message.Value,
             Type = GetMessageType(obj.message.level.Value),
         };
 
-        msg.File = fileInfo != null && fileInfo.Value != null ? Path.Combine(workspaceRoot, fileInfo.Value) : msg.File;
+        // Handle file path - may be Linux path from cargo for remote targets
+        string filePath = fileInfo != null && fileInfo.Value != null
+            ? (string)fileInfo.Value
+            : (string)msg.File;
+
+        msg.File = MapFilePath(workspaceRoot, filePath, pathMapper);
         msg.LogMessage = GetLogMessage(obj.message, msg);
 
         return msg;
     }
 
-    private static dynamic GetProjectFile(dynamic obj)
+    /// <summary>
+    /// Maps a file path from cargo output to a VS-visible path.
+    /// Handles both absolute and relative paths from remote targets.
+    /// </summary>
+    private static string MapFilePath(PathEx workspaceRoot, string filePath, IPathMapper pathMapper)
     {
-        if (obj.manifest_path != null && obj.manifest_path.Value != null)
+        if (string.IsNullOrEmpty(filePath))
         {
-            return obj.manifest_path.Value;
+            return filePath;
         }
 
-        return obj.package_id.Value;
+        // No mapper or local target - use traditional Path.Combine
+        if (pathMapper == null || pathMapper.Kind == TargetKind.Local)
+        {
+            // Relative path - combine with workspace root
+            if (!Path.IsPathRooted(filePath))
+            {
+                return Path.Combine(workspaceRoot, filePath);
+            }
+
+            return filePath;
+        }
+
+        // Remote target - convert Linux path to VS-visible path
+        if (filePath.StartsWith("/", StringComparison.Ordinal))
+        {
+            // Absolute Linux path - map directly
+            var remotePath = new RemotePath(filePath, pathMapper.Kind);
+            return (string)pathMapper.MapToLocal(remotePath);
+        }
+        else
+        {
+            // Relative path - combine with remote workspace root, then map
+            var remoteWorkspace = pathMapper.MapToRemote(workspaceRoot);
+            var fullRemotePath = remoteWorkspace.Combine(filePath);
+            return (string)pathMapper.MapToLocal(fullRemotePath);
+        }
+    }
+
+    private static dynamic GetProjectFile(dynamic obj, IPathMapper pathMapper)
+    {
+        string projectPath = null;
+
+        if (obj.manifest_path != null && obj.manifest_path.Value != null)
+        {
+            projectPath = obj.manifest_path.Value;
+        }
+        else
+        {
+            projectPath = obj.package_id.Value;
+        }
+
+        // Map the project file path for remote targets
+        if (pathMapper != null && pathMapper.Kind != TargetKind.Local && projectPath != null)
+        {
+            if (projectPath.StartsWith("/", StringComparison.Ordinal))
+            {
+                var remotePath = new RemotePath(projectPath, pathMapper.Kind);
+                return (string)pathMapper.MapToLocal(remotePath);
+            }
+        }
+
+        return projectPath;
     }
 
     private static dynamic GetMessageCode(dynamic obj)

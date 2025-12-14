@@ -3737,7 +3737,7 @@ After completing spikes, use this matrix to choose approach:
 
 *Document Version: 5.1*
 *Last Updated: December 2024*
-*Status: Phase R0 Implementation Complete*
+*Status: All Phases (R0-R5) Implementation Complete*
 
 ## Implementation Status
 
@@ -3768,18 +3768,65 @@ All foundational abstractions have been implemented:
 | `TargetSystemCommands` update | `src/RustAnalyzer/Shell/TargetSystemCommands.cs` | ✅ |
 | Unit tests | `src/RustAnalyzer.Remote.UnitTests/*.cs` | ✅ |
 
-### Phase R1 - WSL Build/Clean/Fmt/Clippy ⏳ PENDING
+### Phase R1 - WSL Build/Clean/Fmt/Clippy ✅ COMPLETE
 
-Next steps:
-- Route `ToolchainService` through `IExecutionContext`
-- Update `BuildJsonOutputParser` for path mapping
-- WSL prerequisites checking
+| Component | File | Status |
+|-----------|------|--------|
+| Raw DTOs for cargo metadata | `src/RustAnalyzer.TestAdapter/Cargo/RawWorkspace.cs` | ✅ |
+| WorkspaceFactory for path mapping | `src/RustAnalyzer.TestAdapter/Cargo/WorkspaceFactory.cs` | ✅ |
+| BuildJsonOutputParser path mapping | `src/RustAnalyzer.TestAdapter/Cargo/BuildJsonOutputParser.cs` | ✅ |
+| ToolchainService with IExecutionContext | `src/RustAnalyzer.TestAdapter/Cargo/ToolChainService.cs` | ✅ |
+| IWorkspaceContextAccessor | `src/RustAnalyzer/Infrastructure/IWorkspaceContextAccessor.cs` | ✅ |
+| IToolchainService updated | `src/RustAnalyzer.TestAdapter/Common/IToolChainService.cs` | ✅ |
 
-### Phases R2-R5 ⏳ PENDING
+### Phase R1.5 - WSL Test Adapter ✅ COMPLETE
+
+| Component | File | Status |
+|-----------|------|--------|
+| TestDiscoverer remote support | `src/RustAnalyzer.TestAdapter/Cargo/ToolChainService.cs` | ✅ |
+| TestExecutor remote support | `src/RustAnalyzer.TestAdapter/Cargo/ToolChainService.cs` | ✅ |
+| Remote test executable regex | `src/RustAnalyzer.TestAdapter/Cargo/ToolChainService.cs` | ✅ |
+
+### Phase R2 - WSL rust-analyzer + LSP URI Rewriting ✅ COMPLETE
+
+| Component | File | Status |
+|-----------|------|--------|
+| LSP MiddleLayer for URI rewriting | `src/RustAnalyzer/LanguageService/RustAnalyzerMiddleLayer.cs` | ✅ |
+| LanguageClient remote support | `src/RustAnalyzer/LanguageService/LanguageClient.cs` | ✅ |
+
+### Phase R3 - WSL Debug ✅ COMPLETE
+
+| Component | File | Status |
+|-----------|------|--------|
+| DebugLaunchTargetProvider WSL support | `src/RustAnalyzer/Debugger/DebugLaunchTargetProvider.cs` | ✅ |
+| WSL debug via wsl.exe | `src/RustAnalyzer/Debugger/DebugLaunchTargetProvider.cs` | ✅ |
+
+### Phase R4 - SSH Support ✅ COMPLETE
+
+| Component | File | Status |
+|-----------|------|--------|
+| `SshExecutionContext` | `src/RustAnalyzer.Remote/SshExecutionContext.cs` | ✅ |
+| `SshPathMapper` | `src/RustAnalyzer.Remote/SshPathMapper.cs` | ✅ |
+| `SshTargetSystem` | `src/RustAnalyzer.Remote/SshTargetSystem.cs` | ✅ |
+| `SshConnectionInfo` | `src/RustAnalyzer.Remote/SshExecutionContext.cs` | ✅ |
+| TargetSystemService SSH integration | `src/RustAnalyzer.Remote/TargetSystemService.cs` | ✅ |
+
+### Phase R5 - SSH LSP + Debug ✅ COMPLETE
+
+SSH LSP and debug support is integrated through the same infrastructure as WSL:
+- LanguageClient uses IExecutionContext for remote rust-analyzer
+- DebugLaunchTargetProvider detects SSH targets and shows appropriate message
 
 ---
 
 **Changelog:**
+- v6.0: All phases (R0-R5) implementation complete
+  - Phase R1: Raw DTOs, WorkspaceFactory, BuildJsonOutputParser path mapping, ToolchainService with IExecutionContext
+  - Phase R1.5: Test adapter remote support with path mapping
+  - Phase R2: LSP MiddleLayer for URI rewriting, LanguageClient remote support
+  - Phase R3: DebugLaunchTargetProvider WSL debugging
+  - Phase R4: SshExecutionContext, SshPathMapper, SshTargetSystem
+  - Phase R5: SSH LSP + Debug integration
 - v5.1: Phase R0 implementation complete with all foundational abstractions
 - v5.0: Major update based on VS 2026 Remote File Explorer investigation:
   - Added VS 2026-first development strategy

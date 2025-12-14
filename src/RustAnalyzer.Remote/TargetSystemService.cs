@@ -124,11 +124,12 @@ public sealed class TargetSystemService : ITargetSystemService
             }
         }
 
-        // TODO: Add SSH profiles if enabled
-        // if (_sshEnabled)
-        // {
-        //     newTargets.AddRange(GetSshProfiles());
-        // }
+        // Add SSH profiles if enabled
+        if (_sshEnabled && SshExecutionContext.IsSshAvailable())
+        {
+            var sshProfiles = GetSshProfiles();
+            newTargets.AddRange(sshProfiles);
+        }
 
         lock (_lock)
         {
@@ -144,6 +145,26 @@ public sealed class TargetSystemService : ITargetSystemService
                 Task.Run(() => TargetChanged?.Invoke(this, new TargetChangedEventArgs(oldTarget, _currentTarget)));
             }
         }
+    }
+
+    /// <summary>
+    /// Gets saved SSH profiles.
+    /// For now, returns an empty list. In the future, this could read from:
+    /// - Visual Studio's Connection Manager
+    /// - A custom configuration file
+    /// - SSH config file (~/.ssh/config)
+    /// </summary>
+    private IEnumerable<ITargetSystem> GetSshProfiles()
+    {
+        // TODO: Implement SSH profile discovery
+        // Options:
+        // 1. Read from VS Connection Manager if available
+        // 2. Read from custom settings file
+        // 3. Parse ~/.ssh/config for Host entries
+
+        // For now, return empty - users can add connections programmatically
+        // or we can add a UI for adding SSH connections later
+        return Enumerable.Empty<ITargetSystem>();
     }
 
     /// <inheritdoc/>
@@ -162,13 +183,62 @@ public sealed class TargetSystemService : ITargetSystemService
             return new WslTargetSystem(distroName);
         }
 
-        // TODO: Check for SSH cache paths
-        // if (SshPathMapper.TryGetProfileName(path, out var profileName))
-        // {
-        //     return new SshTargetSystem(profileName);
-        // }
+        // Check for SSH cache paths
+        if (SshPathMapper.TryGetConnectionId(path, out var connectionId))
+        {
+            // Parse connection ID back to connection info
+            // Format: ssh:user@host or ssh:user@host:port
+            var connectionInfo = ParseConnectionId(connectionId);
+            if (connectionInfo != null)
+            {
+                return new SshTargetSystem(connectionInfo);
+            }
+        }
 
         return LocalTargetSystem.Instance;
+    }
+
+    /// <summary>
+    /// Parses an SSH connection ID back to connection info.
+    /// </summary>
+    private static SshConnectionInfo ParseConnectionId(string connectionId)
+    {
+        if (string.IsNullOrEmpty(connectionId) || !connectionId.StartsWith("ssh:", StringComparison.OrdinalIgnoreCase))
+        {
+            return null;
+        }
+
+        var rest = connectionId.Substring(4); // Remove "ssh:" prefix
+
+        string username = null;
+        string host;
+        int port = 22;
+
+        // Parse user@host:port
+        var atIndex = rest.IndexOf('@');
+        if (atIndex > 0)
+        {
+            username = rest.Substring(0, atIndex);
+            rest = rest.Substring(atIndex + 1);
+        }
+
+        var colonIndex = rest.LastIndexOf(':');
+        if (colonIndex > 0 && int.TryParse(rest.Substring(colonIndex + 1), out var parsedPort))
+        {
+            port = parsedPort;
+            host = rest.Substring(0, colonIndex);
+        }
+        else
+        {
+            host = rest;
+        }
+
+        return new SshConnectionInfo
+        {
+            Host = host,
+            Port = port,
+            Username = username,
+        };
     }
 
     /// <summary>
