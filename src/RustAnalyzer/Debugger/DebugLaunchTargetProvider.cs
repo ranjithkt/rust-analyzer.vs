@@ -75,6 +75,8 @@ public sealed class DebugLaunchTargetProvider : ILaunchDebugTargetProvider
             var targetSystem = WorkspaceContextAccessor?.GetCurrentTarget();
             var pathMapper = targetSystem?.GetPathMapper();
 
+            L.WriteLine("LaunchDebugTarget: Target system = {0} (Kind: {1})", targetSystem?.DisplayName ?? "null", targetSystem?.Kind.ToString() ?? "unknown");
+
             if (targetSystem != null && targetSystem.Kind != TargetKind.Local)
             {
                 await LaunchRemoteDebugTargetAsync(
@@ -193,14 +195,24 @@ public sealed class DebugLaunchTargetProvider : ILaunchDebugTargetProvider
             await LaunchWslDebugTargetAsync(
                 serviceProvider, targetSystem, remoteProcessPath, remoteWorkingDir, args, env, noDebugFlag, ct);
         }
-        else
+        else if (targetSystem.Kind == TargetKind.Ssh)
         {
+            L.WriteLine("SSH debugging requested for: {0}", remoteProcessPath);
+
             // SSH debugging - show message for now
             await VsCommon.ShowMessageBoxAsync(
                 $"SSH debugging is not yet fully implemented.\n\n" +
                 $"Remote executable: {remoteProcessPath}\n" +
-                $"Arguments: {args}",
+                $"Arguments: {args}\n\n" +
+                $"To debug manually, you can:\n" +
+                $"1. SSH to the remote host\n" +
+                $"2. Run: gdbserver :1234 {remoteProcessPath} {args}\n" +
+                $"3. In VS, use Debug > Attach to Process > Connection type: SSH",
                 "SSH Debugging (Preview)");
+        }
+        else
+        {
+            L.WriteError("Unknown target kind for remote debugging: {0}", targetSystem.Kind);
         }
     }
 

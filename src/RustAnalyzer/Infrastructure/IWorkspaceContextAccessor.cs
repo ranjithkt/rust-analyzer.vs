@@ -1,7 +1,6 @@
 using System.ComponentModel.Composition;
-using System.Collections.Concurrent;
-using System.Threading;
 using KS.RustAnalyzer.Remote;
+using KS.RustAnalyzer.Shell;
 using KS.RustAnalyzer.TestAdapter.Common;
 using Microsoft.VisualStudio.Workspace.VSIntegration.Contracts;
 
@@ -35,38 +34,27 @@ public interface IWorkspaceContextAccessor
 
 /// <summary>
 /// Default implementation of <see cref="IWorkspaceContextAccessor"/>.
+/// Uses TargetSystemStore to ensure the same service instance is shared across all components.
 /// </summary>
 [Export(typeof(IWorkspaceContextAccessor))]
 [PartCreationPolicy(CreationPolicy.Shared)]
 public sealed class WorkspaceContextAccessor : IWorkspaceContextAccessor
 {
-    private readonly ConcurrentDictionary<string, ITargetSystemService> _cache = new();
-
     [Import]
     public IVsFolderWorkspaceService WorkspaceService { get; set; }
 
     /// <inheritdoc/>
     public ITargetSystemService GetTargetSystemService()
     {
-        var workspace = WorkspaceService.CurrentWorkspace;
+        var workspace = WorkspaceService?.CurrentWorkspace;
         if (workspace == null)
         {
             return null;
         }
 
-        var location = workspace.Location;
-        return _cache.GetOrAdd(location, path =>
-        {
-            var options = Options.GetLiveInstanceAsync().GetAwaiter().GetResult();
-            var service = new TargetSystemService(
-                (PathEx)path,
-                options?.EnableWslSupport ?? false,
-                options?.EnableSshSupport ?? false);
-
-            // Initialize available targets
-            _ = service.RefreshAvailableTargetsAsync(CancellationToken.None);
-            return service;
-        });
+        // Use TargetSystemStore to get the shared service instance
+        // This ensures the dropdown and all other components use the same instance
+        return TargetSystemStore.GetService((PathEx)workspace.Location);
     }
 
     /// <inheritdoc/>
