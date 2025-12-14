@@ -141,7 +141,8 @@ public sealed class TargetSystemService : ITargetSystemService
                 System.Diagnostics.Debug.WriteLine($"[RefreshAvailableTargets] Found {distros.Length} WSL distros: {string.Join(", ", distros)}");
                 foreach (var distro in distros)
                 {
-                    newTargets.Add(new WslTargetSystem(distro));
+                    // Pass workspace root to match UNC path format (wsl$ vs wsl.localhost)
+                    newTargets.Add(new WslTargetSystem(distro, (string)_workspaceRoot));
                 }
             }
         }
@@ -303,7 +304,8 @@ public sealed class TargetSystemService : ITargetSystemService
         // Check for WSL UNC path
         if (WslPathMapper.TryGetDistroName(path, out var distroName))
         {
-            return new WslTargetSystem(distroName);
+            // Pass workspace path to match UNC format (wsl$ vs wsl.localhost)
+            return new WslTargetSystem(distroName, path);
         }
 
         // Check for SSH cache paths

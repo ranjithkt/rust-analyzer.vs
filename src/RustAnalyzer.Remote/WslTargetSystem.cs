@@ -8,6 +8,7 @@ namespace KS.RustAnalyzer.Remote;
 public sealed class WslTargetSystem : ITargetSystem
 {
     private readonly string _distroName;
+    private readonly string _referencePath; // Used to determine UNC format (wsl$ vs wsl.localhost)
     private readonly Lazy<WslExecutionContext> _executionContext;
     private readonly Lazy<WslPathMapper> _pathMapper;
 
@@ -15,13 +16,18 @@ public sealed class WslTargetSystem : ITargetSystem
     /// Creates a new WSL target system for the specified distro.
     /// </summary>
     /// <param name="distroName">The WSL distribution name.</param>
-    public WslTargetSystem(string distroName)
+    /// <param name="referencePath">Optional reference path to match UNC format (wsl$ vs wsl.localhost).</param>
+    public WslTargetSystem(string distroName, string referencePath = null)
     {
         _distroName = distroName ?? throw new ArgumentNullException(nameof(distroName));
+        _referencePath = referencePath;
 
         // Lazy initialization for execution context and path mapper
         _executionContext = new Lazy<WslExecutionContext>(() => new WslExecutionContext(_distroName));
-        _pathMapper = new Lazy<WslPathMapper>(() => new WslPathMapper(_distroName));
+        _pathMapper = new Lazy<WslPathMapper>(() =>
+            _referencePath != null
+                ? WslPathMapper.CreateMatchingFormat(_distroName, _referencePath)
+                : new WslPathMapper(_distroName));
     }
 
     /// <summary>
@@ -53,7 +59,8 @@ public sealed class WslTargetSystem : ITargetSystem
     {
         if (WslPathMapper.TryGetDistroName(uncPath, out var distroName))
         {
-            return new WslTargetSystem(distroName);
+            // Pass the UNC path as reference to match the format
+            return new WslTargetSystem(distroName, uncPath);
         }
 
         return null;

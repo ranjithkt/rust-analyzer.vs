@@ -111,7 +111,8 @@ public sealed class CmdServices
         {
             L?.WriteLine("[CmdServices] Auto-detecting WSL target for distro: {0}", detectedDistro);
             executionContext = new WslExecutionContext(detectedDistro);
-            pathMapper = new WslPathMapper(detectedDistro);
+            // Use the same path format (wsl$ vs wsl.localhost) as the manifest path
+            pathMapper = WslPathMapper.CreateMatchingFormat(detectedDistro, (string)manifestPath);
         }
 
         // Map the operation to the remote-aware version

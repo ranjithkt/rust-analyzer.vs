@@ -52,7 +52,8 @@ public sealed class MetadataServiceFactory : IWorkspaceServiceFactory
             {
                 L?.WriteLine("[MetadataServiceFactory] Using fallback WSL context for distro: {0}", detectedDistro);
                 var wslContext = new WslExecutionContext(detectedDistro);
-                var wslMapper = new WslPathMapper(detectedDistro);
+                // Use the same path format (wsl$ vs wsl.localhost) as the workspace location
+                var wslMapper = WslPathMapper.CreateMatchingFormat(detectedDistro, (string)workspaceLocation);
                 return (wslContext, wslMapper);
             }
 

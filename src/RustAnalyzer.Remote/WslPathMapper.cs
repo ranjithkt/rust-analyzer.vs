@@ -11,22 +11,50 @@ namespace KS.RustAnalyzer.Remote;
 public sealed class WslPathMapper : IPathMapper
 {
     private readonly string _distroName;
-    private readonly string _uncPrefix;      // \\wsl$\Distro
-    private readonly string _uncAltPrefix;   // \\wsl.localhost\Distro
+    private readonly string _uncPrefix;      // \\wsl$\Distro (legacy)
+    private readonly string _uncAltPrefix;   // \\wsl.localhost\Distro (modern)
+    private readonly string _preferredPrefix; // The prefix to use for MapToLocal
     private readonly int _uncPrefixLength;
     private readonly int _uncAltPrefixLength;
 
     /// <summary>
     /// Creates a new WSL path mapper for the specified distro.
+    /// Uses \\wsl.localhost\ prefix by default (modern Windows 10/11 format).
     /// </summary>
     /// <param name="distroName">The WSL distribution name (e.g., "Ubuntu").</param>
     public WslPathMapper(string distroName)
+        : this(distroName, useLocalhostPrefix: true)
+    {
+    }
+
+    /// <summary>
+    /// Creates a new WSL path mapper for the specified distro with explicit prefix selection.
+    /// </summary>
+    /// <param name="distroName">The WSL distribution name (e.g., "Ubuntu").</param>
+    /// <param name="useLocalhostPrefix">True to use \\wsl.localhost\, false for \\wsl$\.</param>
+    public WslPathMapper(string distroName, bool useLocalhostPrefix)
     {
         _distroName = distroName ?? throw new ArgumentNullException(nameof(distroName));
         _uncPrefix = $@"\\wsl$\{distroName}";
         _uncAltPrefix = $@"\\wsl.localhost\{distroName}";
         _uncPrefixLength = _uncPrefix.Length;
         _uncAltPrefixLength = _uncAltPrefix.Length;
+
+        // Use the prefix that matches how modern Windows accesses WSL
+        _preferredPrefix = useLocalhostPrefix ? _uncAltPrefix : _uncPrefix;
+    }
+
+    /// <summary>
+    /// Creates a WslPathMapper that will use the same UNC prefix format as the given reference path.
+    /// </summary>
+    /// <param name="distroName">The WSL distribution name.</param>
+    /// <param name="referencePath">A path to detect the preferred prefix format from.</param>
+    /// <returns>A WslPathMapper configured to match the reference path's format.</returns>
+    public static WslPathMapper CreateMatchingFormat(string distroName, string referencePath)
+    {
+        // Detect which format the reference path uses
+        bool useLocalhostPrefix = referencePath?.StartsWith(@"\\wsl.localhost\", StringComparison.OrdinalIgnoreCase) ?? true;
+        return new WslPathMapper(distroName, useLocalhostPrefix);
     }
 
     /// <summary>
@@ -79,7 +107,7 @@ public sealed class WslPathMapper : IPathMapper
         // Handle empty path
         if (string.IsNullOrEmpty(linuxPath))
         {
-            return (PathEx)_uncPrefix;
+            return (PathEx)_preferredPrefix;
         }
 
         // Ensure path starts with /
@@ -88,13 +116,13 @@ public sealed class WslPathMapper : IPathMapper
             linuxPath = "/" + linuxPath;
         }
 
-        // Convert / to \ and prepend UNC prefix
-        // Optimize: use char[] buffer for single allocation
-        var buffer = new char[_uncPrefixLength + linuxPath.Length];
+        // Convert / to \ and prepend UNC prefix (use preferred prefix to match VS format)
+        var prefixLength = _preferredPrefix.Length;
+        var buffer = new char[prefixLength + linuxPath.Length];
 
-        _uncPrefix.AsSpan().CopyTo(buffer);
+        _preferredPrefix.AsSpan().CopyTo(buffer);
 
-        var destSpan = buffer.AsSpan(_uncPrefixLength);
+        var destSpan = buffer.AsSpan(prefixLength);
         for (int i = 0; i < linuxPath.Length; i++)
         {
             destSpan[i] = linuxPath[i] == '/' ? '\\' : linuxPath[i];

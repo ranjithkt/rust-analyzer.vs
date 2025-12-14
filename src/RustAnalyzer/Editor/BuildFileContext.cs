@@ -84,7 +84,8 @@ public abstract class BuildFileContextBase : IBuildFileContext
                  WslPathMapper.TryGetDistroName(BuildTargetInfo.ManifestPath, out var detectedDistro))
         {
             executionContext = new WslExecutionContext(detectedDistro);
-            pathMapper = new WslPathMapper(detectedDistro);
+            // Use the same path format (wsl$ vs wsl.localhost) as the manifest path
+            pathMapper = WslPathMapper.CreateMatchingFormat(detectedDistro, (string)BuildTargetInfo.ManifestPath);
         }
 
         await RlsUpdatedNotification.ShowAsync();
