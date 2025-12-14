@@ -199,4 +199,23 @@ public sealed class SshPathMapper : IPathMapper
 
         return false;
     }
+
+    /// <summary>
+    /// Checks if a path is a valid SSH cache path (for RemoteCache mode).
+    /// Used to distinguish between LocalSync mode (local Windows paths) and RemoteCache mode.
+    /// </summary>
+    /// <param name="path">The path to check.</param>
+    /// <returns>True if this is an SSH cache path.</returns>
+    public static bool IsValidSshCachePath(string path)
+    {
+        if (string.IsNullOrEmpty(path))
+        {
+            return false;
+        }
+
+        var localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+        var sshCacheRoot = System.IO.Path.Combine(localAppData, "rust-analyzer.vs", "ssh-cache");
+
+        return path.StartsWith(sshCacheRoot, StringComparison.OrdinalIgnoreCase);
+    }
 }

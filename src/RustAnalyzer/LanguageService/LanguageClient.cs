@@ -73,8 +73,23 @@ public class LanguageClient : ILanguageClient, ILanguageClientCustomMessage2
         var executionContext = target?.GetExecutionContext();
         var pathMapper = target?.GetPathMapper();
 
-        // Check if we should use remote execution
-        if (executionContext != null && executionContext.Kind != TargetKind.Local)
+        var workspaceLocation = WorkspaceService.CurrentWorkspace?.Location;
+
+        // For SSH targets with local Windows workspace paths (LocalSync mode),
+        // run LSP locally since source files are on the local machine.
+        // Only builds will run remotely.
+        if (executionContext?.Kind == TargetKind.Ssh && !string.IsNullOrEmpty(workspaceLocation))
+        {
+            // Check if this is a local Windows path (not an SSH cache path)
+            if (!SshPathMapper.IsValidSshCachePath(workspaceLocation))
+            {
+                L.WriteLine("SSH LocalSync mode detected - running rust-analyzer locally for workspace: {0}", workspaceLocation);
+                return await ActivateLocalAsync(token).ConfigureAwait(false);
+            }
+        }
+
+        // Check if we should use remote execution (WSL or SSH RemoteCache mode)
+        if (executionContext != null && executionContext.Kind != TargetKind.Local && pathMapper != null)
         {
             return await ActivateRemoteAsync(executionContext, pathMapper, token).ConfigureAwait(false);
         }
