@@ -5,7 +5,6 @@ using System.IO;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
-using KS.RustAnalyzer.TestAdapter;
 using KS.RustAnalyzer.TestAdapter.Common;
 
 namespace KS.RustAnalyzer.Remote;
@@ -32,10 +31,10 @@ public sealed class LocalExecutionContext : IExecutionContext
     public ExecutionCapabilities Capabilities => ExecutionCapabilities.All;
 
     /// <inheritdoc/>
-    public string CargoCommand => Constants.CargoExe;
+    public string CargoCommand => RemoteConstants.CargoExe;
 
     /// <inheritdoc/>
-    public string RustupCommand => Constants.RustUpExe;
+    public string RustupCommand => RemoteConstants.RustUpExe;
 
     /// <inheritdoc/>
     public string BinaryExtension => ".exe";
@@ -124,7 +123,7 @@ public sealed class LocalExecutionContext : IExecutionContext
         ct.ThrowIfCancellationRequested();
 
         // For local, we use the bundled rust-analyzer.exe or find it in PATH
-        var raPath = Constants.RAExeNameNoExtension + ".exe";
+        var raPath = RemoteConstants.RAExeNameNoExtension + ".exe";
         var foundPath = raPath.FindInPath();
 
         if (!string.IsNullOrEmpty(foundPath))

@@ -8,7 +8,7 @@ namespace KS.RustAnalyzer.TestAdapter.Cargo;
 /// These preserve paths as strings to avoid PathEx corruption of Linux paths.
 /// Use <see cref="WorkspaceFactory"/> to convert to <see cref="Workspace"/> with proper path mapping.
 /// </summary>
-internal sealed class RawWorkspace
+public sealed class RawWorkspace
 {
     [JsonProperty("version")]
     public int Version { get; set; }
@@ -26,7 +26,7 @@ internal sealed class RawWorkspace
 /// <summary>
 /// Raw package data from cargo metadata.
 /// </summary>
-internal sealed class RawPackage
+public sealed class RawPackage
 {
     [JsonProperty("name")]
     public string Name { get; set; }
@@ -41,7 +41,7 @@ internal sealed class RawPackage
 /// <summary>
 /// Raw target data from cargo metadata.
 /// </summary>
-internal sealed class RawTarget
+public sealed class RawTarget
 {
     [JsonProperty("name")]
     public string Name { get; set; }

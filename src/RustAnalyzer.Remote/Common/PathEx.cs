@@ -10,6 +10,11 @@ public readonly struct PathEx : IEquatable<PathEx>
     public const StringComparison DefaultComparison = StringComparison.OrdinalIgnoreCase;
     public static readonly StringComparer DefaultComparer = StringComparer.OrdinalIgnoreCase;
 
+    /// <summary>
+    /// An empty PathEx instance.
+    /// </summary>
+    public static readonly PathEx Empty = new PathEx(string.Empty);
+
     private readonly string _path;
 
     public PathEx(string path)
