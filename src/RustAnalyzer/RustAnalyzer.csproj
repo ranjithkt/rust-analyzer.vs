@@ -3,7 +3,6 @@
   <PropertyGroup>
     <VSToolsPath Condition="'$(VSToolsPath)' == ''">$(MSBuildExtensionsPath32)\Microsoft\VisualStudio\v$(VisualStudioVersion)</VSToolsPath>
     <LangVersion>latest</LangVersion>
-    <GenerateResourceUsePreserializedResources>true</GenerateResourceUsePreserializedResources>
   </PropertyGroup>
   <Import Project="$(MSBuildExtensionsPath)\$(MSBuildToolsVersion)\Microsoft.Common.props" Condition="Exists('$(MSBuildExtensionsPath)\$(MSBuildToolsVersion)\Microsoft.Common.props')" />
   <PropertyGroup>
@@ -84,7 +83,9 @@
     <Compile Include="Infrastructure\SettingsService.cs" />
     <Compile Include="Infrastructure\VsCommon.cs" />
     <Compile Include="LanguageService\ContentDefinition.cs" />
+    <Compile Include="LanguageService\RustAnalyzerMiddleLayer.cs" />
     <Compile Include="Debugger\DebugLaunchTargetProvider.cs" />
+    <Compile Include="Infrastructure\IWorkspaceContextAccessor.cs" />
     <Compile Include="Editor\FileContextProvider.cs" />
     <Compile Include="Editor\FileScanner.cs" />
     <Compile Include="LanguageService\LanguageClient.cs" />
@@ -158,9 +159,6 @@
   </ItemGroup>
   <ItemGroup>
     <PackageReference Include="System.Collections.Immutable" Version="7.0.0" />
-    <PackageReference Include="System.Resources.Extensions" Version="8.0.0">
-      <IncludeAssets>all</IncludeAssets>
-    </PackageReference>
     <Reference Include="Microsoft.VisualBasic" />
     <PackageReference Include="System.ComponentModel.Composition" Version="9.0.0-preview.7.24405.7" />
     <PackageReference Include="Microsoft.VisualStudio.Threading" Version="17.11.20" />
