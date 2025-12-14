@@ -1,10 +1,8 @@
-using System;
 using System.Threading;
 using System.Threading.Tasks;
 using AutoMapper;
 using KS.RustAnalyzer.Infrastructure;
 using KS.RustAnalyzer.Remote;
-using KS.RustAnalyzer.Shell;
 using KS.RustAnalyzer.TestAdapter.Common;
 using Microsoft.VisualStudio.Workspace.Build;
 using WorkspaceBuildMessage = Microsoft.VisualStudio.Workspace.Build.BuildMessage;
