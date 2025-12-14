@@ -50,15 +50,9 @@ public sealed class BuildOutputSink : IBuildOutputSink
                     }
                     else if (message is DetailedBuildMessage bm)
                     {
-                        // Report to Error List
+                        // Report to Error List - VS's VsBuildMessagesManager will also output to Output Window
+                        // so we don't need to call OutputStringThreadSafe ourselves (that would cause duplicates)
                         await buildOutputTaskReporter(bm);
-
-                        // Also output to Output Window with user-friendly format
-                        if (!string.IsNullOrEmpty(bm.LogMessage))
-                        {
-                            var hr = _buildOutputPane.OutputStringThreadSafe(bm.LogMessage + Environment.NewLine);
-                            Ensure.That(ErrorHandler.Succeeded(hr));
-                        }
                     }
                     else
                     {
