@@ -117,8 +117,19 @@ public sealed class WslExecutionContext : IExecutionContext
             outputSink: null,
             ct).ConfigureAwait(false);
 
+        // Log stderr for debugging - it often contains warnings/info messages
+        // (e.g., "Updating crates.io index", "Downloading xyz", etc.)
+        if (result.StandardError.Count > 0)
+        {
+            System.Diagnostics.Debug.WriteLine($"[WslExecutionContext] {command} stderr:");
+            foreach (var line in result.StandardError.Where(l => !string.IsNullOrWhiteSpace(l)))
+            {
+                System.Diagnostics.Debug.WriteLine($"  {line}");
+            }
+        }
+
+        // Only return stdout - stderr breaks JSON parsing but is logged above
         return result.StandardOutput
-            .Concat(result.StandardError)
             .Where(l => !string.IsNullOrWhiteSpace(l))
             .ToArray();
     }
