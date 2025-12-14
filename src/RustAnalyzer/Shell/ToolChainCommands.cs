@@ -3,6 +3,7 @@ using System.Linq;
 using System.Threading.Tasks;
 using Community.VisualStudio.Toolkit;
 using KS.RustAnalyzer.Infrastructure;
+using KS.RustAnalyzer.Remote;
 using KS.RustAnalyzer.TestAdapter;
 using KS.RustAnalyzer.TestAdapter.Cargo;
 using KS.RustAnalyzer.TestAdapter.Common;

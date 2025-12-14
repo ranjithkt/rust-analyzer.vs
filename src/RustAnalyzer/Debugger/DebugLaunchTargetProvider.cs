@@ -35,27 +35,49 @@ public sealed class DebugLaunchTargetProvider : ILaunchDebugTargetProvider
 
     public void LaunchDebugTarget(IWorkspace workspaceContext, IServiceProvider serviceProvider, DebugLaunchActionContext debugLaunchActionContext)
     {
-        var lcw = new LaunchConfigWrapper(debugLaunchActionContext.LaunchConfiguration, new TL { T = T, L = L, });
-        workspaceContext.JTF.Run(async () => await LaunchDebugTargetAsync(workspaceContext, serviceProvider, lcw, default));
+        L.WriteLine("[LaunchDebugTarget] ENTRY - Starting debug launch");
+        try
+        {
+            var lcw = new LaunchConfigWrapper(debugLaunchActionContext.LaunchConfiguration, new TL { T = T, L = L, });
+            L.WriteLine("[LaunchDebugTarget] Launch config created, running async...");
+            workspaceContext.JTF.Run(async () => await LaunchDebugTargetAsync(workspaceContext, serviceProvider, lcw, default));
+            L.WriteLine("[LaunchDebugTarget] EXIT - Async completed");
+        }
+        catch (Exception ex)
+        {
+            L.WriteError("[LaunchDebugTarget] EXCEPTION: {0}", ex.ToString());
+            throw;
+        }
     }
 
     public bool SupportsContext(IWorkspace workspaceContext, string targetFilePath)
     {
+        L.WriteLine("[SupportsContext] Checking: {0}", targetFilePath);
         var mds = workspaceContext.GetService<IMetadataService>();
         var package = workspaceContext.JTF.Run(async () => await workspaceContext.GetService<IMetadataService>()?.GetContainingPackageAsync((PathEx)targetFilePath, default));
 
-        return package != null;
+        var result = package != null;
+        L.WriteLine("[SupportsContext] Result: {0} (Package: {1})", result, package?.FullPath ?? "null");
+        return result;
     }
 
     private async Task LaunchDebugTargetAsync(IWorkspace workspaceContext, IServiceProvider serviceProvider, LaunchConfigWrapper lcw, CancellationToken ct)
     {
         const string diagMessage = "Delete the .vs folder and try again. If that does not work please file a bug with the repro steps.";
+        L.WriteLine("[LaunchDebugTargetAsync] ENTRY");
         try
         {
+            var programKey = lcw[LaunchConfigurationConstants.ProgramKey];
+            L.WriteLine("[LaunchDebugTargetAsync] ProgramKey: {0}", programKey);
+
             var mds = workspaceContext.GetService<IMetadataService>();
-            var package = await mds.GetContainingPackageAsync((PathEx)lcw[LaunchConfigurationConstants.ProgramKey], default);
+            var package = await mds.GetContainingPackageAsync((PathEx)programKey, default);
+            L.WriteLine("[LaunchDebugTargetAsync] Package: {0}", package?.FullPath ?? "null");
+
             var profile = workspaceContext.GetProfile(package.ManifestPath);
             var targetFQN = lcw[LaunchConfigurationConstants.NameKey];
+            L.WriteLine("[LaunchDebugTargetAsync] Profile: {0}, TargetFQN: {1}", profile, targetFQN);
+
             var target = package.GetTargets().FirstOrDefault(t => t.QualifiedTargetFileName == targetFQN);
             if (target == null)
             {
@@ -65,6 +87,8 @@ public sealed class DebugLaunchTargetProvider : ILaunchDebugTargetProvider
                 await VsCommon.ShowMessageBoxAsync(message, diagMessage);
                 return;
             }
+
+            L.WriteLine("[LaunchDebugTargetAsync] Found target: {0}", target.QualifiedTargetFileName);
 
             var args = await GetSettingsAsync(SettingsInfo.TypeCommandLineArguments, workspaceContext.GetService<ISettingsService>(), lcw);
             var env = await GetSettingsAsync(SettingsInfo.TypeDebuggerEnvironment, workspaceContext.GetService<ISettingsService>(), lcw);
@@ -172,7 +196,7 @@ public sealed class DebugLaunchTargetProvider : ILaunchDebugTargetProvider
         IPathMapper pathMapper,
         CancellationToken ct)
     {
-        L.WriteLine("LaunchDebugTarget (remote: {0}) with profile: {1}", targetSystem.Kind, profile);
+        L.WriteLine("[LaunchRemoteDebugTargetAsync] ENTRY - Kind: {0}, Profile: {1}", targetSystem.Kind, profile);
         T.TrackEvent("DebugRemote", ("Target", targetFQN), ("Profile", profile), ("TargetKind", targetSystem.Kind.ToString()));
 
         // For WSL debugging, we need to use a different approach:
@@ -183,7 +207,10 @@ public sealed class DebugLaunchTargetProvider : ILaunchDebugTargetProvider
         // and provide the command to manually start gdbserver
 
         var processName = target.GetPath(profile);
+        L.WriteLine("[LaunchRemoteDebugTargetAsync] Local process path: {0}", processName);
+
         var remoteProcessPath = pathMapper.MapToRemote((PathEx)processName);
+        L.WriteLine("[LaunchRemoteDebugTargetAsync] Remote process path: {0}", remoteProcessPath);
 
         // Get the remote working directory
         var remoteWorkingDir = workingDirectory.IsNullOrEmpty()

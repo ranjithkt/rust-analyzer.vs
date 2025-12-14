@@ -1,9 +1,11 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Threading;
 using System.Threading.Tasks;
 using AutoMapper;
 using KS.RustAnalyzer.Infrastructure;
+using KS.RustAnalyzer.Remote;
 using KS.RustAnalyzer.TestAdapter.Common;
 using Microsoft.VisualStudio;
 using Microsoft.VisualStudio.ComponentModelHost;
@@ -16,6 +18,7 @@ using WorkspaceBuildMessage = Microsoft.VisualStudio.Workspace.Build.BuildMessag
 namespace KS.RustAnalyzer.Shell;
 
 using ToolchainOperation = System.Func<KS.RustAnalyzer.TestAdapter.Common.IToolchainService, System.Func<KS.RustAnalyzer.TestAdapter.Common.BuildTargetInfo, KS.RustAnalyzer.TestAdapter.Common.BuildOutputSinks, System.Threading.CancellationToken, System.Threading.Tasks.Task<bool>>>;
+using RemoteToolchainOperation = System.Func<KS.RustAnalyzer.TestAdapter.Common.IToolchainService, System.Func<KS.RustAnalyzer.TestAdapter.Common.BuildTargetInfo, KS.RustAnalyzer.TestAdapter.Common.BuildOutputSinks, KS.RustAnalyzer.Remote.IExecutionContext, KS.RustAnalyzer.Remote.IPathMapper, System.Threading.CancellationToken, System.Threading.Tasks.Task<bool>>>;
 
 public sealed class CmdServices
 {
@@ -28,6 +31,7 @@ public sealed class CmdServices
     private ISettingsService _settingsService;
     private IBuildOutputSink _buildOutputSink;
     private IVsFolderWorkspaceService _folderWorkspaceService;
+    private IWorkspaceContextAccessor _workspaceContextAccessor;
 
     public CmdServices(Func<AsyncPackage> getPackage)
     {
@@ -54,6 +58,8 @@ public sealed class CmdServices
 
     public IVsFolderWorkspaceService FolderWorkspaceService => _folderWorkspaceService ??= Mef?.GetService<IVsFolderWorkspaceService>();
 
+    public IWorkspaceContextAccessor WorkspaceContextAccessor => _workspaceContextAccessor ??= Mef?.GetService<IWorkspaceContextAccessor>();
+
     private readonly IMapper _buildMessageMapper = new MapperConfiguration(cfg => cfg.CreateMap<DetailedBuildMessage, WorkspaceBuildMessage>()).CreateMapper();
 
     public async Task ExecuteToolchainOperationAsync(ToolchainOperation op, PathEx manifestPath, Func<Options, string> getOpts)
@@ -62,16 +68,64 @@ public sealed class CmdServices
         var opts = await Options.GetLiveInstanceAsync();
 
         var bms = await FolderWorkspaceService.CurrentWorkspace.GetBuildMessageServiceAsync();
-        await op(ToolchainService)(
-            new BuildTargetInfo
+        var bti = new BuildTargetInfo
+        {
+            ManifestPath = manifestPath,
+            AdditionalBuildArgs = getOpts(opts),
+            Profile = profile,
+            WorkspaceRoot = manifestPath.GetDirectoryName(),
+        };
+        var bos = new BuildOutputSinks { OutputSink = BuildOutputSink, BuildActionProgressReporter = bm => bms.ReportBuildMessages(new[] { _buildMessageMapper.Map<WorkspaceBuildMessage>(bm) }) };
+
+        // Get the current target system
+        var currentTarget = WorkspaceContextAccessor?.GetCurrentTarget();
+        var executionContext = currentTarget?.GetExecutionContext();
+        var pathMapper = currentTarget?.GetPathMapper();
+
+        // Log the target for debugging
+        L?.WriteLine("[CmdServices] Executing toolchain operation on target: {0} (Kind: {1})", currentTarget?.DisplayName ?? "Local", currentTarget?.Kind.ToString() ?? "Local");
+
+        // Map the operation to the remote-aware version
+        RemoteToolchainOperation remoteOp = MapToRemoteOperation(op);
+
+        // Execute with execution context and path mapper (null for local targets)
+        await remoteOp(ToolchainService)(bti, bos, executionContext, pathMapper, CancellationToken.None);
+    }
+
+    /// <summary>
+    /// Maps a local ToolchainOperation to its remote-aware equivalent.
+    /// </summary>
+    private static RemoteToolchainOperation MapToRemoteOperation(ToolchainOperation op)
+    {
+        // Create a test service instance to get the method reference
+        // This is a bit hacky but allows us to determine which operation was requested
+        return its =>
+        {
+            var localFunc = op(its);
+
+            // Match by comparing the delegate target
+            if (localFunc.Method.Name == nameof(IToolchainService.BuildAsync))
             {
-                ManifestPath = manifestPath,
-                AdditionalBuildArgs = getOpts(opts),
-                Profile = profile,
-                WorkspaceRoot = manifestPath.GetDirectoryName(),
-            },
-            new BuildOutputSinks { OutputSink = BuildOutputSink, BuildActionProgressReporter = bm => bms.ReportBuildMessages(new[] { _buildMessageMapper.Map<WorkspaceBuildMessage>(bm) }) },
-            default);
+                return its.BuildAsync;
+            }
+            else if (localFunc.Method.Name == nameof(IToolchainService.CleanAsync))
+            {
+                return its.CleanAsync;
+            }
+            else if (localFunc.Method.Name == nameof(IToolchainService.RunClippyAsync))
+            {
+                return its.RunClippyAsync;
+            }
+            else if (localFunc.Method.Name == nameof(IToolchainService.RunFmtAsync))
+            {
+                return its.RunFmtAsync;
+            }
+            else
+            {
+                // Fallback: wrap the local operation (won't support remote)
+                return (bti, bos, ec, pm, ct) => localFunc(bti, bos, ct);
+            }
+        };
     }
 
     public IEnumerable<PathEx> GetSelectedItems()
