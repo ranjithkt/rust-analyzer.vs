@@ -92,14 +92,20 @@ public abstract class BaseBuildToolChainCommand<T> : BaseCommand<T>
         await RustAnalyzerPackage.JTF.SwitchToMainThreadAsync();
 
         var selectedPath = GetManifestPath();
-        await CmdServices.ExecuteToolchainOperationAsync(Operation, selectedPath, GetOptions);
+        if (!selectedPath.HasValue)
+        {
+            return;
+        }
+
+        await CmdServices.ExecuteToolchainOperationAsync(Operation, selectedPath.Value, GetOptions);
     }
 
-    protected PathEx GetManifestPath()
+    protected PathEx? GetManifestPath()
     {
         ThreadHelper.ThrowIfNotOnUIThread();
 
-        return CmdServices.GetWorkspaceRoot() + Constants.ManifestFileName2;
+        var workspaceRoot = CmdServices.GetWorkspaceRoot();
+        return workspaceRoot.HasValue ? workspaceRoot.Value + Constants.ManifestFileName2 : null;
     }
 
     protected string GetToolArgsFromSettings(string argName)
@@ -108,7 +114,13 @@ public abstract class BaseBuildToolChainCommand<T> : BaseCommand<T>
             {
                 await RustAnalyzerPackage.JTF.SwitchToMainThreadAsync();
 
-                return await CmdServices.SettingsService.GetAsync(argName, GetManifestPath());
+                var manifestPath = GetManifestPath();
+                if (!manifestPath.HasValue)
+                {
+                    return string.Empty;
+                }
+
+                return await CmdServices.SettingsService.GetAsync(argName, manifestPath.Value);
             });
 
     private bool IsCommandActive()
@@ -116,7 +128,12 @@ public abstract class BaseBuildToolChainCommand<T> : BaseCommand<T>
         ThreadHelper.ThrowIfNotOnUIThread();
 
         var workspaceRoot = CmdServices.GetWorkspaceRoot();
-        return (workspaceRoot + Constants.ManifestFileName2).FileExists() && CmdServices.IsIdeInDesignMode();
+        if (workspaceRoot == null)
+        {
+            return false;
+        }
+
+        return (workspaceRoot.Value + Constants.ManifestFileName2).FileExists() && CmdServices.IsIdeInDesignMode();
     }
 }
 

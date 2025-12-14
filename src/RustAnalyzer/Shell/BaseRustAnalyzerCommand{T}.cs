@@ -47,7 +47,12 @@ public abstract class BaseRustAnalyzerCommand<T> : BaseCommand<T>
         ThreadHelper.ThrowIfNotOnUIThread();
 
         var workspaceRoot = CmdServices.GetWorkspaceRoot();
-        return (workspaceRoot + Constants.ManifestFileName2).FileExists() && CmdServices.IsIdeInDesignMode();
+        if (workspaceRoot == null)
+        {
+            return false;
+        }
+
+        return (workspaceRoot.Value + Constants.ManifestFileName2).FileExists() && CmdServices.IsIdeInDesignMode();
     }
 
     protected abstract void ExecuteCore(object sender, OleMenuCmdEventArgs eventArgs);
