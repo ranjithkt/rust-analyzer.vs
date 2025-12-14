@@ -88,6 +88,13 @@ public readonly struct RemotePath : IEquatable<RemotePath>
             return this;
         }
 
+        // Trim trailing slash from base path to avoid double slashes
+        var basePath = _path.AsSpan();
+        while (basePath.Length > 0 && basePath[basePath.Length - 1] == '/')
+        {
+            basePath = basePath.Slice(0, basePath.Length - 1);
+        }
+
         // Build combined path - avoid double slashes
         string newPath;
         if (_path.Length > 0 && _path[_path.Length - 1] == '/')
@@ -120,6 +127,7 @@ public readonly struct RemotePath : IEquatable<RemotePath>
         // No separator - whole path is the filename
         if (_lastSeparatorIndex < 0)
         {
+            // No separator - the whole path is the file name
             return _path ?? string.Empty;
         }
 
