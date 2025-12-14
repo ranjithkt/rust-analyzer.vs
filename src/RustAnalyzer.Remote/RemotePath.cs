@@ -88,8 +88,15 @@ public readonly struct RemotePath : IEquatable<RemotePath>
             return this;
         }
 
+        // Trim trailing slash from base path to avoid double slashes
+        var basePath = _path.AsSpan();
+        while (basePath.Length > 0 && basePath[basePath.Length - 1] == '/')
+        {
+            basePath = basePath.Slice(0, basePath.Length - 1);
+        }
+
         // Build combined path - single allocation
-        var newPath = string.Concat(_path, "/", segmentSpan.ToString());
+        var newPath = string.Concat(basePath.ToString(), "/", segmentSpan.ToString());
         var newLastSep = newPath.LastIndexOf('/');
 
         return new RemotePath(newPath, Kind, newLastSep);
@@ -102,9 +109,22 @@ public readonly struct RemotePath : IEquatable<RemotePath>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public string GetFileName()
     {
-        if (_lastSeparatorIndex < 0 || _lastSeparatorIndex >= _path.Length - 1)
+        // Special case: root path "/" returns "/" as its name
+        if (_path == "/")
         {
+            return "/";
+        }
+
+        if (_lastSeparatorIndex < 0)
+        {
+            // No separator - the whole path is the file name
             return _path ?? string.Empty;
+        }
+
+        if (_lastSeparatorIndex >= _path.Length - 1)
+        {
+            // Trailing slash - no file name (it's a directory)
+            return string.Empty;
         }
 
         return _path.Substring(_lastSeparatorIndex + 1);
