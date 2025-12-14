@@ -1,377 +1,356 @@
 ---
 name: WSL Full Support Implementation
-overview: Implement complete WSL support for rust-analyzer.vs, enabling users to open repos from within WSL, edit files in Visual Studio 2022/2026, and execute build, test, debug, clippy, and format operations entirely within WSL.
+overview: |
+  Implement WSL-first support for rust-analyzer.vs so a repo living in WSL can be opened in Visual Studio (Open Folder), edited via UNC paths, and all Rust tooling (cargo build/clean/test, clippy, fmt, rust-analyzer, debugging) executes inside WSL.
+
+  SSH support that already exists (current: remote build via SSH, plus additional plumbing) MUST remain supported.
+
+status: planning
+last_reviewed: 2025-12-14
+assumptions:
+  - Visual Studio opens WSL repos via UNC paths (\\wsl$\<distro>\... or \\wsl.localhost\<distro>\...).
+  - For WSL-first, the source of truth is the Linux filesystem (ext4 in WSL2 is the primary target).
+  - Windows-local Rust toolchain must NOT be required for WSL-first scenarios.
+non_goals:
+  - Implementing new SSH UX (remote open-folder) in this plan.
+  - Removing or redesigning existing SSH build support.
+
+# NOTE: This frontmatter is used as a planning tracker.
+# Status values: pending | in_progress | completed | cancelled
+
 todos:
+  - id: wsl-metadata-remote
+    content: Make workspace/package metadata discovery run cargo metadata in WSL (MetadataService must use IExecutionContext/IPathMapper)
+    status: pending
+  - id: startup-prereqs-gating
+    content: Stop enforcing Windows cargo/rustup/rust-analyzer download at VS startup for WSL-first workspaces (make prereqs target-aware + lazy)
+    status: pending
+  - id: wsl-exec-streaming
+    content: Fix WslExecutionContext to stream output to IProcessOutputSink (required for JSON build parsing and UX)
+    status: pending
+  - id: wsl-exec-fileops
+    content: Fix WslExecutionContext file/dir ops (no shell operators without a shell) and add --cd fallback
+    status: pending
   - id: wsl-process-cancel
-    content: Implement setsid/pkill process group cancellation in WslExecutionContext
+    content: Implement robust WSL cancellation (setsid/pkill process group cleanup) in WslExecutionContext
+    status: pending
+  - id: uri-mapping-hardening
+    content: Harden WslPathMapper (and SshPathMapper) URI mapping (file:///… vs file://…) and add unit tests for real VS URI forms
+    status: pending
+  - id: file-scanner-target-aware
+    content: Make FileScanner/launch target generation target-aware (no .exe assumptions for WSL)
     status: pending
   - id: test-executor-remote
-    content: Add remote execution support to TestExecutor for WSL test binaries
+    content: Add WSL test execution support in TestExecutor (run ELF tests in WSL via IExecutionContext)
     status: pending
-  - id: prereqs-wsl
-    content: Add WSL prerequisites check (cargo, rustup, rust-analyzer, gdbserver)
+  - id: testcontainer-debug-engine
+    content: Make TestContainer debug engine selection target-aware (NativeOnly is wrong for WSL)
+    status: pending
+  - id: targetstore-lifecycle
+    content: Fix TargetSystemStore lifecycle (per-workspace service; clear on workspace change; avoid cross-workspace bleed)
     status: pending
   - id: target-change-reset
-    content: Implement full state reset when target system changes (LSP, cache, tests, diagnostics)
+    content: Implement full state reset on target change (stop LSP, clear caches, invalidate tests, clear diagnostics)
+    status: pending
+  - id: debug-miengine-spikes
+    content: Run MIEngine/gdbserver spikes for Open Folder WSL debugging (engine GUIDs, required options, source mapping, networking)
     status: pending
   - id: debug-gdbserver
-    content: Implement WSL debugging using gdbserver + MIEngine instead of native debugger
+    content: Implement real WSL debugging using gdbserver + MIEngine (not NativeOnly over wsl.exe)
     status: pending
   - id: debug-export-fix
-    content: Fix DebugLaunchTargetProvider export to handle WSL binaries without .exe extension
+    content: Fix DebugLaunchTargetProvider export/SupportsContext to handle WSL binaries without .exe extension
     status: pending
   - id: open-wsl-terminal
-    content: Add right-click context menu "Open WSL Terminal Here" on folders to launch WSL shell at selected path
+    content: Add right-click context menu "Open WSL Terminal Here" for WSL folders (nice-to-have, not a blocker)
     status: pending
   - id: integration-test
-    content: "Manual integration testing: open WSL folder, build, test, debug end-to-end"
+    content: Manual integration testing (open WSL folder, build, clippy, fmt, LSP, test discover/execute, debug)
+    status: pending
+  - id: regression-ssh-build
+    content: Regression test: existing SSH build LocalSync remains intact and unchanged
     status: pending
 ---
 
-# WSL Full Support Implementation Plan
+# WSL Full Support Implementation Plan (WSL-first)
+
+## Goal / user story
+
+**Primary user story**: “My Rust repo lives in WSL. I open it in VS 2026 via `\\wsl$\…`, edit files, and VS runs `cargo build`, `cargo test`, `cargo clippy`, `cargo fmt`, rust-analyzer, and debugging entirely inside WSL.”
+
+**Constraints**:
+- WSL-first must work **without requiring a Windows Rust toolchain**.
+- Do **not** remove existing SSH support (current: remote build after syncing to remote).
+
+## Architectural invariants (do not violate)
+
+- **Do not modify** `PathEx` (it normalizes `/` to `\` and is Windows-only).
+- For Linux paths use `RemotePath`.
+- All target-specific process execution must go through `IExecutionContext`.
+- All path/URI translation across boundaries must go through `IPathMapper`.
+
+## Current state (verified in code, 2025-12-14)
+
+The repo has a meaningful remote foundation, but it is not yet “WSL-first complete”.
+
+### Implemented (usable building blocks)
+
+- **Target system foundation**: `ITargetSystem`, `TargetSystemService`, `TargetKind`, `IExecutionContext`, `IPathMapper`, `RemotePath`.
+  - Files: `../src/RustAnalyzer.Remote/*`
+- **WSL plumbing**:
+  - `WslTargetSystem`, `WslPathMapper`, `WslExecutionContext`.
+  - Files: `../src/RustAnalyzer.Remote/Wsl*.cs`
+- **SSH plumbing** (must keep):
+  - `SshTargetSystem`, `SshExecutionContext`, `SshPathMapper`, `LocalToRemoteSyncMapper`.
+  - Files: `../src/RustAnalyzer.Remote/Ssh*.cs`, `../src/RustAnalyzer.Remote/LocalToRemoteSyncMapper.cs`
+- **Build/clean/clippy/fmt call path is remote-aware**:
+  - `BuildFileContext` and `CmdServices` pass `(IExecutionContext, IPathMapper)` into `ToolchainService`.
+  - Files: `../src/RustAnalyzer/Editor/BuildFileContext.cs`, `../src/RustAnalyzer/Shell/CmdServices.cs`, `../src/RustAnalyzer.TestAdapter/Cargo/ToolChainService.cs`
+- **LSP has remote startup + middleware**:
+  - `LanguageClient` can start remote rust-analyzer via `IExecutionContext.StartRustAnalyzerAsync()`.
+  - `RustAnalyzerMiddleLayer` rewrites URIs.
+  - Files: `../src/RustAnalyzer/LanguageService/LanguageClient.cs`, `../src/RustAnalyzer/LanguageService/RustAnalyzerMiddleLayer.cs`
+- **Target dropdown exists + persisted selection**:
+  - `TargetSystemStore` persists selection under `.vs/rust-analyzer/workspace-settings.json`.
+  - File: `../src/RustAnalyzer/Shell/TargetSystemCommands.cs`
+
+### Known missing / incorrect pieces (WSL-first blockers)
+
+These are the items that prevent WSL-first from being reliable and/or from working without Windows cargo:
+
+1) **Metadata/package discovery still uses local Windows cargo**
+- `MetadataService` calls `IToolchainService.GetWorkspaceAsync(manifestPath, ct)` with **no execution context**, so it will require Windows cargo and will not work when the repo is only in WSL.
+- File: `../src/RustAnalyzer.TestAdapter/Cargo/MetadataService.cs`
+
+2) **Startup prereqs & installer are Windows-centric and always run**
+- On package load, VS runs prerequisite checks and downloads Windows rust-analyzer.
+- `PreReqsCheckService` currently checks Windows `cargo.exe`/`rustup.exe`.
+- Files:
+  - `../src/RustAnalyzer/RustAnalyzerPackage.cs`
+  - `../src/RustAnalyzer/Infrastructure/PreReqsCheckService.cs`
+  - `../src/RustAnalyzer/Infrastructure/RlsInstallerService.cs`
+
+3) **WSL execution context correctness issues**
+- `WslExecutionContext` currently:
+  - Does not stream output to `IProcessOutputSink` (critical for build JSON parsing and good UX).
+  - Uses shell operators (e.g. `&&`) without running through a shell, making `FileExistsAsync` / `DirectoryExistsAsync` logically wrong.
+- File: `../src/RustAnalyzer.Remote/WslExecutionContext.cs`
+
+4) **Test execution is host-only**
+- `TestExecutor` runs test binaries using `ProcessRunner` (cannot run ELF tests via UNC path).
+- File: `../src/RustAnalyzer.TestAdapter/TestExecutor.cs`
+
+5) **Debugging is not the desired WSL MIEngine/gdbserver workflow**
+- Current WSL debug path wraps `wsl.exe` and uses `NativeOnly_guid`. This is not the “VS gdbserver on WSL” model.
+- Export is restricted to `.exe`.
+- `TestContainer.DebugEngines` is hard-coded to `NativeOnly_guid`.
+- Files:
+  - `../src/RustAnalyzer/Debugger/DebugLaunchTargetProvider.cs`
+  - `../src/RustAnalyzer/TestAdapter/TestContainer.cs`
+
+6) **Launch target generation still contains `.exe` assumptions**
+- `FileScanner` uses `target.GetPath(profile)` without passing the current `TargetKind`, which returns `.exe` paths.
+- File: `../src/RustAnalyzer/Editor/FileScanner.cs`
+
+7) **Target service lifecycle is static and not per-workspace**
+- `TargetSystemStore` keeps a single static `_service` and is not cleared on workspace change.
+- File: `../src/RustAnalyzer/Shell/TargetSystemCommands.cs`
+
+## Important note about doc drift
+
+`docs/REMOTE_WSL_SSH_PLAN.md` contains an “Implementation Complete” status section. The codebase does have many of those components, but **WSL-first is not complete yet** due to the blockers above (metadata/prereqs/WSL execution correctness/tests/debug). Treat the WSL plan in *this* document as the authoritative WSL-first execution plan.
+
+## Implementation strategy (phased, WSL-first, SSH-safe)
+
+### Phase 0 — Make target context + lifecycle correct (foundation for everything)
+
+**Goal**: Ensure every component can reliably query “what target am I on?” and that switching workspaces/targets does not leak state.
+
+**Tasks**
+- Make `TargetSystemStore` **per-workspace**:
+  - Maintain a dictionary keyed by workspace root (or a stable workspace identity) → `ITargetSystemService`.
+  - Clear on active workspace change.
+  - Keep persistence as-is, but ensure it’s keyed per workspace.
+  - File: `../src/RustAnalyzer/Shell/TargetSystemCommands.cs`
+- Wire “target changed” → “full state reset”:
+  - Stop rust-analyzer
+  - Clear metadata cache
+  - Invalidate tests
+  - Clear error list diagnostics
+  - Re-run (lazy) prereq checks for the new target
+
+**Acceptance criteria**
+- Switching folders in one VS session does not reuse a stale target list/selection.
+- Switching target in the combo visibly restarts/rebinds state (no stale LSP/diagnostics/tests).
+
+### Phase 1 — Fix startup prerequisites and installer gating (WSL-first cannot require Windows cargo)
+
+**Goal**: Don’t block VS startup for WSL-first users and don’t require Windows cargo/rustup.
+
+**Tasks**
+- Refactor prereqs into **target-aware checks**:
+  - Local target: current checks are fine.
+  - WSL target: use `WslExecutionContext` to check `cargo`, `rustup`, `rust-analyzer`, and (for debug later) `gdbserver`.
+  - SSH target: keep existing behavior (at minimum, build-only scenario).
+  - File: `../src/RustAnalyzer/Infrastructure/PreReqsCheckService.cs`
+- Make prereqs **lazy**:
+  - Don’t run “cargo.exe exists” at package load if the workspace is WSL-first.
+  - Instead, run when the user triggers an operation (build/LSP/test/debug) for that target.
+  - Files: `../src/RustAnalyzer/RustAnalyzerPackage.cs`, plus the call sites for operations.
+- Gate Windows rust-analyzer auto-install:
+  - If the active flow uses remote rust-analyzer (WSL), do not force-install `rust-analyzer.exe` on Windows.
+  - Keep Windows installer for local target scenarios.
+  - File: `../src/RustAnalyzer/Infrastructure/RlsInstallerService.cs` and call site in `RustAnalyzerPackage`.
+
+**Acceptance criteria**
+- A machine with only WSL Rust installed (no Windows cargo) can open a WSL repo in VS without being forced into Windows prereq failures.
+
+### Phase 2 — Make WSL execution context correct (streaming, file ops, cancellation)
+
+**Goal**: Ensure WSL commands behave correctly and provide the same streaming semantics used by build parsing.
+
+**Tasks**
+- Implement streaming behavior in `WslExecutionContext.ExecuteAsync`:
+  - Mirror `SshExecutionContext` pattern: attach a `ProcessOutputRedirector` that forwards to `IProcessOutputSink`.
+- Fix `FileExistsAsync` / `DirectoryExistsAsync`:
+  - Do not use `&&` unless executing under `sh -lc`.
+  - Prefer robust patterns:
+    - `sh -lc "test -f 'path' && echo 1"`
+    - or `stat`/exit-code based checks.
+- Add `wsl.exe --cd` compatibility fallback:
+  - If `--cd` not available, use `sh -lc 'cd … && …'` (with careful quoting).
+- Implement robust cancellation:
+  - Add planned `setsid --fork` + `pkill -g` cleanup.
+
+**Files**
+- `../src/RustAnalyzer.Remote/WslExecutionContext.cs`
+
+**Acceptance criteria**
+- Remote build output appears in the Output pane progressively, and cargo JSON diagnostics are parsed correctly.
+- Cancellation reliably stops runaway cargo/rustc processes in WSL.
+
+### Phase 3 — Make metadata + target/launch discovery WSL-first
+
+**Goal**: Package discovery, targets, and test containers must work with cargo running in WSL.
+
+**Tasks**
+- Make `MetadataService` call the remote-aware overload of `GetWorkspaceAsync`:
+  - It must obtain `(IExecutionContext, IPathMapper)` from current target.
+  - Recommended approach: inject `IWorkspaceContextAccessor` (or a narrow “current target provider”) into `MetadataServiceFactory` and `MetadataService`.
+  - Files:
+    - `../src/RustAnalyzer/Infrastructure/MetadataServiceFactory.cs`
+    - `../src/RustAnalyzer.TestAdapter/Cargo/MetadataService.cs`
+- Make `FileScanner` target-aware when producing output references / launch settings:
+  - Use `target.GetPath(profile, currentTarget.Kind)`.
+  - Ensure “launch target export” does not assume `.exe` for WSL.
+  - File: `../src/RustAnalyzer/Editor/FileScanner.cs`
+
+**Acceptance criteria**
+- Opening a WSL repo shows runnable/debuggable targets in Solution Explorer.
+- Build contexts appear and work for WSL repo without Windows cargo.
+
+### Phase 4 — WSL build/clean/clippy/fmt end-to-end validation
+
+**Goal**: WSL builds produce navigable diagnostics and do not regress SSH build.
+
+**Tasks**
+- Validate the current remote build integration end-to-end after Phase 2+3.
+- Review remaining Windows-only probes:
+  - `ToolchainServiceExtensions.GetCommandOutput(...)` still uses `cmd.exe` and should be local-only or have a remote equivalent for remote scenarios.
+  - File: `../src/RustAnalyzer.TestAdapter/Cargo/ToolChainServiceExtensions.cs`
+
+**Acceptance criteria**
+- WSL: Build/Clean/Clippy/Fmt run inside WSL and diagnostics navigate to files under `\\wsl$\…`.
+- SSH LocalSync build continues to work exactly as before.
+
+### Phase 5 — LSP hardening (remote rust-analyzer in WSL)
+
+**Goal**: Remote rust-analyzer + URI rewriting works reliably for WSL UNC paths.
+
+**Tasks**
+- Fix URI mapping correctness:
+  - Avoid constructing URIs via string concatenation like `"file://" + "/home/..."`.
+  - Ensure Unix absolute paths become `file:///home/...`.
+  - Ensure VS-understood URIs for WSL UNC are emitted correctly.
+  - Files:
+    - `../src/RustAnalyzer.Remote/WslPathMapper.cs`
+    - `../src/RustAnalyzer.Remote/SshPathMapper.cs`
+    - `../src/RustAnalyzer/LanguageService/RustAnalyzerMiddleLayer.cs`
+- Add tests for URI and path variants:
+  - `\\wsl$\Distro\...` and `\\wsl.localhost\Distro\...`
+  - file URI forms that VS emits for UNC paths (capture from real VS session during spike).
+- Ensure remote rust-analyzer process lifecycle is managed:
+  - stop on target change
+  - stop on workspace close
+
+**Acceptance criteria**
+- Completion/hover/diagnostics/go-to-definition work for WSL repo.
+- No “file not found” when navigating to diagnostics.
+
+### Phase 6 — Tests (discover + execute in WSL)
+
+**Goal**: VS Test Explorer can both discover and execute tests when binaries are built in WSL.
+
+**Tasks**
+- Update `TestExecutor` to execute tests via `IExecutionContext` when `TargetKind != Local`.
+  - Replace `ProcessRunner.RunWithLogging(exe, ...)` with `executionContext.ExecuteAsync(remoteExePath, ...)`.
+  - Decide how to handle “debug tests” (likely MIEngine attach path, not `LaunchProcessWithDebuggerAttached`).
+  - File: `../src/RustAnalyzer.TestAdapter/TestExecutor.cs`
+- Make `TestContainer.DebugEngines` target-aware (NativeOnly is wrong for WSL).
+  - File: `../src/RustAnalyzer/TestAdapter/TestContainer.cs`
+
+**Acceptance criteria**
+- “Run All Tests” works for WSL repo.
+- Test results and failure navigation work.
+
+### Phase 7 — Debugging (MIEngine + gdbserver in WSL)
+
+**Goal**: Implement the debugging model you want: VS uses MIEngine and gdbserver in WSL.
+
+**Spikes (do first)**
+- Determine correct debug engine GUID and required VS workload/components for Open Folder.
+- Determine the exact `VsDebugTargetInfo*` shape and options needed.
+- Determine source mapping configuration for UNC ↔ Linux paths.
+- Confirm WSL2 networking behavior (localhost port forwarding vs using WSL IP).
+
+**Implementation tasks**
+- Update `DebugLaunchTargetProvider`:
+  - For WSL target: start `gdbserver` in WSL and connect MIEngine.
+  - Keep local Windows debugging path unchanged.
+  - Keep SSH behavior as-is (currently shows a message).
+  - Fix export to not be `.exe`-only.
+  - File: `../src/RustAnalyzer/Debugger/DebugLaunchTargetProvider.cs`
+
+**Acceptance criteria**
+- F5 hits breakpoints in WSL-built ELF.
+- Stack/locals work.
+- Stepping works.
+
+### Phase 8 — UX polish (optional)
+
+- “Open WSL Terminal Here” context menu (only for WSL folders).
+- Better error messages and guided “Install in WSL” instructions.
+- Document expected performance characteristics (UNC + WSL2).
+
+## Regression / validation matrix (must be maintained)
+
+- **Local Windows repo + Local target**: build, LSP, tests, debug.
+- **WSL repo (UNC) + WSL target**: build, LSP, tests, debug.
+- **Local Windows repo + SSH target (LocalSync)**: build must keep working (do not remove sync).
+
+## Gotchas / sharp edges (call out early)
+
+- **UNC path performance**: `\\wsl$\...` IO can be slower than Linux native; but builds running in WSL are fine.
+- **`.vs` folder on UNC**: persisting settings under `.vs` in WSL UNC path can be slower and occasionally flaky; keep an escape hatch if needed.
+- **URI correctness is non-negotiable**: incorrect `file://` forms will silently break LSP navigation.
+- **WSL command quoting**: if you must fall back to `sh -lc`, quoting/escaping must be correct.
+- **WSL2 networking**: gdbserver port forwarding usually works, but have a fallback to WSL IP (`hostname -I`).
+- **Nightly requirement**: test discovery/execution currently relies on `-Zunstable-options` JSON output; this may require nightly in WSL.
+
+## Notes on SSH support (do not break)
+
+- Keep SSH LocalSync behavior:
+  - source is local Windows
+  - build executes remotely after sync
+  - LSP stays local for LocalSync workspaces (this is intentional and already implemented in `LanguageClient`).
 
-## Current State Analysis
-
-The codebase already has substantial WSL infrastructure in place (Phase R0-R2 mostly complete):
-
-**Implemented:**
-
-- Core abstractions: `RemotePath`, `TargetKind`, `IExecutionContext`, `IPathMapper`, `ITargetSystemService`
-- WSL-specific: `WslExecutionContext`, `WslPathMapper`, `WslTargetSystem`
-- Feature flags: `EnableWslSupport` in [Options.cs](src/RustAnalyzer/Infrastructure/Options.cs)
-- Build/Clean/Fmt/Clippy: Remote execution in [ToolchainService.cs](src/RustAnalyzer.TestAdapter/Cargo/ToolchainService.cs)
-- LSP: `RustAnalyzerMiddleLayer` for URI rewriting, remote rust-analyzer startup
-- Target system UI: Combo dropdown with persistence in [TargetSystemCommands.cs](src/RustAnalyzer/Shell/TargetSystemCommands.cs)
-
-**Gaps to Address:**
-
-### 1. Test Executor - Remote Test Execution (HIGH PRIORITY)
-
-[TestExecutor.cs](src/RustAnalyzer.TestAdapter/TestExecutor.cs) lines 107-145 run test executables locally via `ProcessRunner`. Need remote execution path.
-
-```csharp
-// Current: Runs locally
-using var testExeProc = await ProcessRunner.RunWithLogging(exe, args, exe.GetDirectoryName(), envDict, ct, tl.L, @throw: false);
-```
-
-**Changes Required:**
-
-- Add `IWorkspaceContextAccessor` to `TestExecutor`
-- Get execution context and path mapper from current target
-- Map test executable path to remote path
-- Execute via `IExecutionContext.ExecuteAsync()` instead of `ProcessRunner`
-
-### 2. WSL Debugging with gdbserver/MIEngine (HIGH PRIORITY)
-
-[DebugLaunchTargetProvider.cs](src/RustAnalyzer/Debugger/DebugLaunchTargetProvider.cs) lines 271-333 wraps `wsl.exe` with native debugger. This doesn't provide full debugging - need gdbserver.
-
-**Changes Required:**
-
-- Detect if gdbserver is installed in WSL (prereqs check)
-- Start gdbserver on WSL side: `wsl.exe -d <distro> -- gdbserver :1234 <binary> <args>`
-- Use MIEngine to connect from VS to gdbserver
-- Implement source path mapping for breakpoints
-- Handle WSL2 networking (may need IP detection via `hostname -I`)
-
-### 3. WSL Process Cancellation with Process Groups
-
-[WslExecutionContext.cs](src/RustAnalyzer.Remote/WslExecutionContext.cs) doesn't implement `setsid` + `pkill` pattern per the plan (Decision 4). Killing `wsl.exe` doesn't kill child processes.
-
-**Changes Required:**
-
-- Add `setsid --fork` to command execution
-- Track remote PGID
-- On cancellation, run `pkill -TERM -g <pgid>` then `pkill -KILL -g <pgid>`
-
-### 4. Target Change State Reset
-
-When user changes target in dropdown, need full state reset (per Decision 8 in ARCHITECTURE.md):
-
-**Changes Required:**
-
-- Subscribe to `TargetSystemService.TargetChanged` event
-- Stop rust-analyzer: `_languageClient.StopServerAsync()`
-- Clear MetadataService cache
-- Invalidate test containers: `TestContainerDiscoverer.InvalidateAllContainers()`
-- Clear Error List diagnostics
-- Check prerequisites for new target
-
-### 5. Prerequisites Check for WSL
-
-Need to verify WSL environment has required tools before operations.
-
-**Changes Required:**
-
-- Update [PreReqsCheckService.cs](src/RustAnalyzer/Infrastructure/PreReqsCheckService.cs) to check WSL:
-  - `cargo` exists in WSL
-  - `rustup` exists in WSL
-  - `rust-analyzer` exists in WSL
-  - `gdbserver` exists (for debugging)
-- Show actionable error messages if missing
-
-### 6. Windows-Specific Code Cleanup
-
-Several files have Windows assumptions that need review:
-
-| File | Issue | Fix |
-
-|------|-------|-----|
-
-| [Constants.cs](src/RustAnalyzer.TestAdapter/Constants.cs) | `CargoExe = "cargo.exe"` | Already handled by `IExecutionContext.CargoCommand` |
-
-| [ToolchainService.cs](src/RustAnalyzer.TestAdapter/Cargo/ToolchainService.cs) L23 | Windows test exe regex | Already has `TestExecutablePathCrackerRemote` |
-
-| [DebugLaunchTargetProvider.cs](src/RustAnalyzer/Debugger/DebugLaunchTargetProvider.cs) L21 | `new[] { ".exe" }` export | Need to also handle no extension for WSL |
-
-| [TestExecutor.cs](src/RustAnalyzer.TestAdapter/TestExecutor.cs) L115 | `LaunchProcessWithDebuggerAttached` | Won't work for WSL binaries |
-
-| [PathExExtensions.cs](src/RustAnalyzer.Remote/Common/PathExExtensions.cs) L13 | `File.Exists` for WSL | UNC paths work, but should verify |
-
-### 7. Test Container Discovery for WSL
-
-Test containers are generated after build. For WSL:
-
-- Test binary paths should be UNC paths (`\\wsl$\...`)
-- Container files generated locally in `.vs` folder
-- [ToolchainService.cs](src/RustAnalyzer.TestAdapter/Cargo/ToolchainService.cs) L473-477 already maps remote paths to local
-
-**Verify:** Ensure `TestContainer.TestExes` contains valid UNC paths that VS Test Explorer can navigate to.
-
-### 8. "Open WSL Terminal Here" Context Menu (HIGH PRIORITY - Developer Experience)
-
-Add a right-click context menu option on folders in Solution Explorer to open a WSL terminal at that location. This is critical for developers who need to run cargo commands directly.
-
-**Implementation:**
-
-1. **Add Command Definition in VSCommandTable.vsct:**
-
-   - New button `IdOpenWslTerminal` in `guidRustAnalyzerPackage`
-   - Place in `idgWSE_ContextMenu_ShellActions` group (alongside "Open Command Prompt" etc.)
-   - Icon: Use `Terminal` from ImageCatalogGuid
-
-2. **Create Command Handler:**
-
-   - New file: `src/RustAnalyzer/Shell/OpenWslTerminalCommand.cs`
-   - Get selected folder path from Solution Explorer context
-   - Map UNC path to Linux path: `\\wsl$\Ubuntu\home\user\project` -> `/home/user/project`
-   - Extract distro name from path
-   - Launch: `wsl.exe -d <distro> --cd <linux-path>`
-
-3. **Visibility Logic:**
-
-   - Only show when:
-     - WSL support is enabled in Options
-     - Selected item is a folder
-     - Path is a WSL UNC path (`\\wsl$\...` or `\\wsl.localhost\...`)
-   - Hide for local Windows paths and SSH targets
-
-**Command Implementation:**
-
-```csharp
-[Command(PackageGuids.guidRustAnalyzerPackageString, PackageIds.IdOpenWslTerminal)]
-public sealed class OpenWslTerminalCommand : BaseRustAnalyzerCommand<OpenWslTerminalCommand>
-{
-    protected override void BeforeQueryStatus(EventArgs e)
-    {
-        var selectedPath = GetSelectedFolderPath();
-        var isWslPath = WslPathMapper.TryGetDistroName(selectedPath, out _);
-        var wslEnabled = Options.GetLiveInstanceAsync().GetAwaiter().GetResult()?.EnableWslSupport ?? false;
-
-        Command.Visible = Command.Enabled = wslEnabled && isWslPath;
-    }
-
-    protected override void ExecuteCore(object sender, OleMenuCmdEventArgs e)
-    {
-        var selectedPath = GetSelectedFolderPath();
-        if (WslPathMapper.TryGetDistroName(selectedPath, out var distroName))
-        {
-            var mapper = new WslPathMapper(distroName);
-            var linuxPath = mapper.MapToRemote((PathEx)selectedPath);
-
-            // Launch Windows Terminal with WSL profile, or fallback to wsl.exe directly
-            var psi = new ProcessStartInfo
-            {
-                FileName = "wsl.exe",
-                Arguments = $"-d {distroName} --cd \"{linuxPath}\"",
-                UseShellExecute = true,
-            };
-            Process.Start(psi);
-        }
-    }
-}
-```
-
----
-
-## Implementation Order
-
-```mermaid
-graph TD
-    A[1. Open WSL Terminal Command] --> B[2. Process Cancellation]
-    B --> C[3. Test Executor Remote]
-    C --> D[4. Prerequisites Check]
-    D --> E[5. Target Change Reset]
-    E --> F[6. WSL Debugging gdbserver]
-    F --> G[7. Integration Testing]
-```
-
----
-
-## Detailed Implementation Tasks
-
-### Task 1: WSL Process Cancellation (WslExecutionContext)
-
-File: [src/RustAnalyzer.Remote/WslExecutionContext.cs](src/RustAnalyzer.Remote/WslExecutionContext.cs)
-
-Add process group management:
-
-```csharp
-// In ExecuteAsync, wrap command with setsid
-args.Add("setsid");
-args.Add("--fork");
-// ... rest of command
-
-// Add cancellation handler
-using var ctRegistration = ct.Register(() => KillRemoteProcessGroup());
-
-// Track PGID and implement KillRemoteProcessGroup()
-```
-
-### Task 2: Remote Test Execution (TestExecutor)
-
-Files:
-
-- [src/RustAnalyzer.TestAdapter/TestExecutor.cs](src/RustAnalyzer.TestAdapter/TestExecutor.cs)
-- [src/RustAnalyzer.TestAdapter/TestDiscoverer.cs](src/RustAnalyzer.TestAdapter/TestDiscoverer.cs)
-
-Key changes in `RunTestsFromOneExe`:
-
-- Add parameter for `IExecutionContext` and `IPathMapper`
-- If remote target, map exe path to remote and use execution context
-- Parse test output the same way (JSON format)
-
-### Task 3: Prerequisites Check Service
-
-File: [src/RustAnalyzer/Infrastructure/PreReqsCheckService.cs](src/RustAnalyzer/Infrastructure/PreReqsCheckService.cs)
-
-Add method:
-
-```csharp
-public async Task<(bool Success, string Message)> CheckWslPrerequisitesAsync(
-    IExecutionContext ctx, CancellationToken ct)
-{
-    // Check cargo, rustup, rust-analyzer, optionally gdbserver
-}
-```
-
-### Task 4: Target Change State Reset
-
-File: Create new handler or add to existing [WorkspaceContextAccessor.cs](src/RustAnalyzer/Infrastructure/IWorkspaceContextAccessor.cs)
-
-Subscribe to `TargetChanged` event and coordinate reset across:
-
-- `LanguageClient`
-- `MetadataService`
-- `TestContainerDiscoverer`
-- Error List
-
-### Task 5: WSL Debugging with gdbserver
-
-File: [src/RustAnalyzer/Debugger/DebugLaunchTargetProvider.cs](src/RustAnalyzer/Debugger/DebugLaunchTargetProvider.cs)
-
-Replace `LaunchWslDebugTargetAsync` with gdbserver approach:
-
-```csharp
-// 1. Start gdbserver in WSL
-var gdbPort = FindAvailablePort();
-var gdbArgs = $"-d {distro} --cd \"{remoteWorkingDir}\" -- gdbserver :{gdbPort} {remoteProcessPath} {args}";
-// Start wsl.exe with gdbserver
-
-// 2. Configure MIEngine launch
-var debugInfo = new VsDebugTargetInfo4
-{
-    dlo = DEBUG_LAUNCH_OPERATION.DLO_CreateProcess,
-    guidLaunchDebugEngine = DebugEnginesGuids.ManagedAndNative_guid, // or MIEngine
-    bstrExe = remoteProcessPath,
-    bstrRemoteMachine = $"localhost:{gdbPort}",
-    // ... source mapping options
-};
-```
-
-### Task 6: Launch Target Provider Export Fix
-
-File: [src/RustAnalyzer/Debugger/DebugLaunchTargetProvider.cs](src/RustAnalyzer/Debugger/DebugLaunchTargetProvider.cs) line 21
-
-Current export only handles `.exe`. For WSL, binaries have no extension.
-
-```csharp
-// Consider: Register for both, or use custom logic in Support , just wantContext
-[ExportLaunchDebugTarget(..., new[] { ".exe", "" }, ...)]
-```
-
----
-
-## Files to Modify
-
-| File | Changes |
-
-|------|---------|
-
-| `src/RustAnalyzer.Remote/WslExecutionContext.cs` | Process group cancellation |
-
-| `src/RustAnalyzer.TestAdapter/TestExecutor.cs` | Remote test execution |
-
-| `src/RustAnalyzer.TestAdapter/TestDiscoverer.cs` | Pass context to executor |
-
-| `src/RustAnalyzer/Debugger/DebugLaunchTargetProvider.cs` | gdbserver debugging |
-
-| `src/RustAnalyzer/Infrastructure/PreReqsCheckService.cs` | WSL prerequisites |
-
-| `src/RustAnalyzer/Infrastructure/IWorkspaceContextAccessor.cs` | Target change handling |
-
-| `src/RustAnalyzer/LanguageService/LanguageClient.cs` | Target change restart |
-
-| `src/RustAnalyzer/TestAdapter/TestContainerDiscoverer.cs` | Invalidation method |
-
----
-
-## Testing Strategy
-
-1. **Unit Tests:**
-
-   - `WslExecutionContext` process group tests (mock)
-   - Path mapping roundtrip tests
-
-2. **Manual Integration Tests:**
-
-   - Open WSL folder in VS (`\\wsl$\Ubuntu\...`)
-   - Verify target auto-selects WSL distro
-   - Build, Clean, Clippy, Fmt - all execute in WSL
-   - Test discovery finds tests
-   - Test execution runs in WSL
-   - F5 debugging with gdbserver
-   - Source navigation from diagnostics
-   - Right-click folder > "Open WSL Terminal Here" opens terminal at correct path
-
-3. **Regression Tests:**
-
-   - Local Windows projects still work unchanged
-   - SSH support not broken
-
----
-
-## Risks and Mitigations
-
-| Risk | Mitigation |
-
-|------|------------|
-
-| gdbserver not installed | Prerequisites check with actionable message |
-
-| WSL2 networking issues | Detect IP via `hostname -I`, fallback to localhost |
-
-| Process cancellation race | Use proper locking, timeout on pkill |
-
-| MIEngine not available | Fallback to basic wsl.exe wrapper with message |
-
-| Test perf over UNC | Document as expected; consider caching |
