@@ -8,6 +8,10 @@
     <Compile Include="..\RustAnalyzer\source.extension.cs" Link="source.extension.cs" />
   </ItemGroup>
 
+  <ItemGroup>
+    <ProjectReference Include="..\RustAnalyzer.TestAdapter\RustAnalyzer.TestAdapter.csproj" />
+  </ItemGroup>
+
   <Import Project="..\KS.Common.targets" />
 
 </Project>

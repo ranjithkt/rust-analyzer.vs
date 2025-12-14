@@ -64,7 +64,8 @@
     <Folder Include="Properties\" />
   </ItemGroup>
   <ItemGroup>
-    <Compile Include="RemoteTargetsTests.cs" />
+    <Compile Include="RemotePathTests.cs" />
+    <Compile Include="WslPathMapperTests.cs" />
   </ItemGroup>
   <Import Project="$(MSBuildToolsPath)\Microsoft.CSharp.targets" />
   <!--

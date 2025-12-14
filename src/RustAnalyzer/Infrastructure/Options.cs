@@ -84,4 +84,22 @@ public class Options : BaseOptionModel<Options>, ISettingsServiceDefaults
     [DisplayName("Execution environment")]
     [Description($"Additioanal environment variables to set for test execution. Default: RUST_BACKTRACE=full. Example: RUST_BACKTRACE=1.")]
     public string TestExecutionEnvironment { get; set; } = "RUST_BACKTRACE=full";
+
+    [Browsable(true)]
+    [Category("Remote Development (Preview)")]
+    [DisplayName("Enable WSL Support")]
+    [Description("Enable building, testing, and debugging Rust projects in Windows Subsystem for Linux. " +
+                 "When enabled, WSL distros will appear in the Target System dropdown. " +
+                 "Requires Visual Studio restart to take effect.")]
+    [DefaultValue(false)]
+    public bool EnableWslSupport { get; set; } = false;
+
+    [Browsable(true)]
+    [Category("Remote Development (Preview)")]
+    [DisplayName("Enable SSH Support")]
+    [Description("Enable building, testing, and debugging Rust projects on remote Linux hosts via SSH. " +
+                 "When enabled, SSH profiles will appear in the Target System dropdown. " +
+                 "Requires Visual Studio restart to take effect.")]
+    [DefaultValue(false)]
+    public bool EnableSshSupport { get; set; } = false;
 }

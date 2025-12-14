@@ -1,0 +1,325 @@
+using System;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.IO;
+using System.Linq;
+using System.Text;
+using System.Threading;
+using System.Threading.Tasks;
+using KS.RustAnalyzer.TestAdapter.Common;
+
+namespace KS.RustAnalyzer.Remote;
+
+/// <summary>
+/// Execution context for WSL (Windows Subsystem for Linux).
+/// Executes commands via wsl.exe.
+/// </summary>
+public sealed class WslExecutionContext : IExecutionContext
+{
+    private const string WslExePath = @"C:\Windows\System32\wsl.exe";
+
+    private readonly string _distroName;
+    private readonly IPathMapper _pathMapper;
+
+    /// <summary>
+    /// Creates a new WSL execution context for the specified distro.
+    /// </summary>
+    /// <param name="distroName">The WSL distribution name.</param>
+    public WslExecutionContext(string distroName)
+    {
+        _distroName = distroName ?? throw new ArgumentNullException(nameof(distroName));
+        _pathMapper = new WslPathMapper(distroName);
+    }
+
+    /// <summary>
+    /// Gets the WSL distribution name.
+    /// </summary>
+    public string DistroName => _distroName;
+
+    /// <inheritdoc/>
+    public TargetKind Kind => TargetKind.Wsl;
+
+    /// <inheritdoc/>
+    public ExecutionCapabilities Capabilities =>
+        ExecutionCapabilities.CanBuild |
+        ExecutionCapabilities.CanRunLsp |
+        ExecutionCapabilities.CanRunTests |
+        ExecutionCapabilities.CanDebug;
+
+    /// <inheritdoc/>
+    public string CargoCommand => "cargo";
+
+    /// <inheritdoc/>
+    public string RustupCommand => "rustup";
+
+    /// <inheritdoc/>
+    public string BinaryExtension => string.Empty;
+
+    /// <inheritdoc/>
+    public async Task<ProcessResult> ExecuteAsync(
+        string command,
+        IEnumerable<string> arguments,
+        RemotePath workingDirectory,
+        IDictionary<string, string> environment,
+        IProcessOutputSink outputSink,
+        CancellationToken ct)
+    {
+        var stopwatch = Stopwatch.StartNew();
+
+        // Build wsl.exe command line
+        var wslArgs = BuildWslArguments(command, arguments, workingDirectory, environment);
+
+        using var proc = ProcessRunner.Run(
+            WslExePath,
+            wslArgs,
+            workingDirectory: null, // wsl.exe handles this via --cd
+            env: null,
+            ct);
+
+        outputSink?.OnProcessStarted(proc.ProcessId);
+
+        var exitCode = await proc;
+
+        stopwatch.Stop();
+        outputSink?.OnProcessExited(exitCode);
+
+        return new ProcessResult
+        {
+            ExitCode = exitCode,
+            StandardOutput = proc.StandardOutputLines.ToList(),
+            StandardError = proc.StandardErrorLines.ToList(),
+            Duration = stopwatch.Elapsed,
+        };
+    }
+
+    /// <inheritdoc/>
+    public async Task<string[]> ExecuteAndCaptureAsync(
+        string command,
+        IEnumerable<string> arguments,
+        RemotePath workingDirectory,
+        CancellationToken ct)
+    {
+        var result = await ExecuteAsync(
+            command,
+            arguments,
+            workingDirectory,
+            environment: null,
+            outputSink: null,
+            ct).ConfigureAwait(false);
+
+        return result.StandardOutput
+            .Concat(result.StandardError)
+            .Where(l => !string.IsNullOrWhiteSpace(l))
+            .ToArray();
+    }
+
+    /// <inheritdoc/>
+    public async Task<bool> FileExistsAsync(RemotePath path, CancellationToken ct)
+    {
+        var result = await ExecuteAndCaptureAsync(
+            "test",
+            new[] { "-f", (string)path, "&&", "echo", "1" },
+            new RemotePath("/", TargetKind.Wsl),
+            ct).ConfigureAwait(false);
+
+        return result.Any(l => l.Trim() == "1");
+    }
+
+    /// <inheritdoc/>
+    public async Task<bool> DirectoryExistsAsync(RemotePath path, CancellationToken ct)
+    {
+        var result = await ExecuteAndCaptureAsync(
+            "test",
+            new[] { "-d", (string)path, "&&", "echo", "1" },
+            new RemotePath("/", TargetKind.Wsl),
+            ct).ConfigureAwait(false);
+
+        return result.Any(l => l.Trim() == "1");
+    }
+
+    /// <inheritdoc/>
+    public async Task<string> ReadFileAsync(RemotePath path, CancellationToken ct)
+    {
+        var result = await ExecuteAndCaptureAsync(
+            "cat",
+            new[] { (string)path },
+            new RemotePath("/", TargetKind.Wsl),
+            ct).ConfigureAwait(false);
+
+        return string.Join(Environment.NewLine, result);
+    }
+
+    /// <inheritdoc/>
+    public async Task<RemotePath> GetRustAnalyzerPathAsync(CancellationToken ct)
+    {
+        // Try to find rust-analyzer via which
+        var result = await ExecuteAndCaptureAsync(
+            "which",
+            new[] { "rust-analyzer" },
+            new RemotePath("/", TargetKind.Wsl),
+            ct).ConfigureAwait(false);
+
+        if (result.Length > 0 && !string.IsNullOrWhiteSpace(result[0]))
+        {
+            var path = result[0].Trim();
+            if (path.StartsWith("/", StringComparison.Ordinal))
+            {
+                return new RemotePath(path, TargetKind.Wsl);
+            }
+        }
+
+        // Try ~/.cargo/bin/rust-analyzer
+        var homeResult = await ExecuteAndCaptureAsync(
+            "sh",
+            new[] { "-c", "echo $HOME" },
+            new RemotePath("/", TargetKind.Wsl),
+            ct).ConfigureAwait(false);
+
+        if (homeResult.Length > 0 && !string.IsNullOrWhiteSpace(homeResult[0]))
+        {
+            var home = homeResult[0].Trim();
+            var raPath = new RemotePath($"{home}/.cargo/bin/rust-analyzer", TargetKind.Wsl);
+
+            if (await FileExistsAsync(raPath, ct).ConfigureAwait(false))
+            {
+                return raPath;
+            }
+        }
+
+        throw new FileNotFoundException(
+            $"rust-analyzer not found in WSL distro '{_distroName}'. " +
+            $"Install it by running: rustup component add rust-analyzer");
+    }
+
+    /// <inheritdoc/>
+    public async Task<(Stream Input, Stream Output)> StartRustAnalyzerAsync(
+        RemotePath workingDirectory,
+        CancellationToken ct)
+    {
+        var raPath = await GetRustAnalyzerPathAsync(ct).ConfigureAwait(false);
+
+        // Build wsl.exe command for rust-analyzer
+        var wslArgs = new[]
+        {
+            "-d", _distroName,
+            "--cd", (string)workingDirectory,
+            "--",
+            (string)raPath,
+        };
+
+        var psi = new ProcessStartInfo(WslExePath)
+        {
+            Arguments = ProcessRunner.GetArguments(wslArgs, quoteArgs: true),
+            RedirectStandardInput = true,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false,
+            CreateNoWindow = true,
+        };
+
+        var process = new Process { StartInfo = psi };
+        process.Start();
+
+        return (process.StandardInput.BaseStream, process.StandardOutput.BaseStream);
+    }
+
+    /// <summary>
+    /// Builds the wsl.exe argument array.
+    /// </summary>
+    private string[] BuildWslArguments(
+        string command,
+        IEnumerable<string> arguments,
+        RemotePath workingDirectory,
+        IDictionary<string, string> environment)
+    {
+        var args = new List<string>(16)
+        {
+            "-d", _distroName,
+            "--cd", (string)workingDirectory,
+            "--",
+        };
+
+        // Add environment variables as env command prefix if needed
+        if (environment != null && environment.Count > 0)
+        {
+            args.Add("env");
+            foreach (var kv in environment)
+            {
+                // Escape values that contain special characters
+                var escapedValue = EscapeForShell(kv.Value);
+                args.Add($"{kv.Key}={escapedValue}");
+            }
+        }
+
+        args.Add(command);
+
+        if (arguments != null)
+        {
+            args.AddRange(arguments);
+        }
+
+        return args.ToArray();
+    }
+
+    /// <summary>
+    /// Escapes a value for shell usage.
+    /// </summary>
+    private static string EscapeForShell(string value)
+    {
+        if (string.IsNullOrEmpty(value))
+        {
+            return "''";
+        }
+
+        // If value contains no special characters, return as-is
+        if (value.IndexOfAny(new[] { ' ', '"', '\'', '\\', '$', '`', '!', '*', '?', '[', ']', '(', ')', '{', '}', '|', '&', ';', '<', '>', '\n', '\r', '\t' }) < 0)
+        {
+            return value;
+        }
+
+        // Escape single quotes and wrap in single quotes
+        return "'" + value.Replace("'", "'\\''") + "'";
+    }
+
+    /// <summary>
+    /// Checks if WSL is available on this system.
+    /// </summary>
+    public static bool IsWslAvailable()
+    {
+        return File.Exists(WslExePath);
+    }
+
+    /// <summary>
+    /// Enumerates installed WSL distributions.
+    /// </summary>
+    public static async Task<string[]> GetInstalledDistrosAsync(CancellationToken ct)
+    {
+        if (!IsWslAvailable())
+        {
+            return Array.Empty<string>();
+        }
+
+        try
+        {
+            using var proc = ProcessRunner.Run(
+                WslExePath,
+                new[] { "--list", "--quiet" },
+                workingDirectory: null,
+                env: null,
+                ct);
+
+            await proc;
+
+            // Filter out empty lines and the null character that WSL sometimes emits
+            return proc.StandardOutputLines
+                .Select(l => l.Trim().TrimEnd('\0'))
+                .Where(l => !string.IsNullOrWhiteSpace(l))
+                .ToArray();
+        }
+        catch
+        {
+            return Array.Empty<string>();
+        }
+    }
+}
+

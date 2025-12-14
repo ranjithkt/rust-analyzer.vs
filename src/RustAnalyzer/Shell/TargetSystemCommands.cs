@@ -1,17 +1,108 @@
 using System;
+using System.ComponentModel.Composition;
+using System.Linq;
 using System.Runtime.InteropServices;
+using System.Threading;
 using Community.VisualStudio.Toolkit;
 using EnsureThat;
-using EnvDTE;
+using KS.RustAnalyzer.Infrastructure;
+using KS.RustAnalyzer.Remote;
+using KS.RustAnalyzer.TestAdapter.Common;
 using Microsoft.VisualStudio.Shell;
 
 namespace KS.RustAnalyzer.Shell;
 
-public static class TemporaryTargetSystemStore
+/// <summary>
+/// Provides access to the current target system service.
+/// This is used by the commands to get/set the active target.
+/// </summary>
+public static class TargetSystemStore
 {
-    public static string[] TargetSystems { get; set; } = { "Local Machine" };
+    private static ITargetSystemService _service;
+    private static readonly object _lock = new object();
 
-    public static string CurrentTargetSystem { get; set; } = TargetSystems[0];
+    /// <summary>
+    /// Gets or creates the target system service for the current workspace.
+    /// </summary>
+    public static ITargetSystemService GetService(PathEx workspaceRoot)
+    {
+        lock (_lock)
+        {
+            if (_service == null && workspaceRoot != null)
+            {
+                var options = Options.GetLiveInstanceAsync().GetAwaiter().GetResult();
+                _service = new TargetSystemService(
+                    workspaceRoot,
+                    options?.EnableWslSupport ?? false,
+                    options?.EnableSshSupport ?? false);
+
+                // Initialize available targets
+                _ = _service.RefreshAvailableTargetsAsync(CancellationToken.None);
+            }
+
+            return _service;
+        }
+    }
+
+    /// <summary>
+    /// Clears the cached service (call when workspace changes).
+    /// </summary>
+    public static void ClearService()
+    {
+        lock (_lock)
+        {
+            _service = null;
+        }
+    }
+
+    /// <summary>
+    /// Gets the current target display name for the combo.
+    /// </summary>
+    public static string CurrentTargetDisplayName
+    {
+        get
+        {
+            var service = _service;
+            return service?.CurrentTarget?.DisplayName ?? LocalTargetSystem.Instance.DisplayName;
+        }
+    }
+
+    /// <summary>
+    /// Gets the available target display names for the combo.
+    /// </summary>
+    public static string[] AvailableTargetDisplayNames
+    {
+        get
+        {
+            var service = _service;
+            if (service == null)
+            {
+                return new[] { LocalTargetSystem.Instance.DisplayName };
+            }
+
+            return service.AvailableTargets.Select(t => t.DisplayName).ToArray();
+        }
+    }
+
+    /// <summary>
+    /// Sets the current target by display name.
+    /// </summary>
+    public static void SetCurrentTargetByDisplayName(string displayName)
+    {
+        var service = _service;
+        if (service == null)
+        {
+            return;
+        }
+
+        var target = service.AvailableTargets.FirstOrDefault(t =>
+            string.Equals(t.DisplayName, displayName, StringComparison.OrdinalIgnoreCase));
+
+        if (target != null)
+        {
+            _ = service.SetCurrentTargetAsync(target, CancellationToken.None);
+        }
+    }
 }
 
 [Command(PackageGuids.guidRustAnalyzerTargetSystemCmdSetString, PackageIds.IdTargetSystemCombo)]
@@ -28,14 +119,14 @@ public sealed class TargetSystemComboCommand : BaseRustAnalyzerCommand<TargetSys
         // IDE is requesting the current value for the combo.
         if (vOut != IntPtr.Zero)
         {
-            Marshal.GetNativeVariantForObject(TemporaryTargetSystemStore.CurrentTargetSystem, vOut);
+            Marshal.GetNativeVariantForObject(TargetSystemStore.CurrentTargetDisplayName, vOut);
             return;
         }
 
         // New value was selected in the combo.
         if (input != null)
         {
-            TemporaryTargetSystemStore.CurrentTargetSystem = input.ToString();
+            TargetSystemStore.SetCurrentTargetByDisplayName(input.ToString());
         }
     }
 }
@@ -50,6 +141,6 @@ public sealed class TargetSystemComboGetListCommand : BaseRustAnalyzerCommand<Ta
 
         var vOut = eventArgs.OutValue;
 
-        Marshal.GetNativeVariantForObject(TemporaryTargetSystemStore.TargetSystems, vOut);
+        Marshal.GetNativeVariantForObject(TargetSystemStore.AvailableTargetDisplayNames, vOut);
     }
 }

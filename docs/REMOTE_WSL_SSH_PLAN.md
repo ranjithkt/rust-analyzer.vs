@@ -26,7 +26,7 @@ public readonly struct RemotePath
 {
     // Use ReadOnlySpan for parsing to avoid allocations
     public static bool TryParse(ReadOnlySpan<char> path, TargetKind kind, out RemotePath result);
-    
+
     // Cache computed values
     private readonly int _lastSeparatorIndex; // Pre-computed for GetFileName/GetDirectoryName
 }
@@ -34,7 +34,7 @@ public readonly struct RemotePath
 // ❌ AVOID: Multiple string allocations in hot paths
 public RemotePath GetDirectoryName() =>
     new RemotePath(string.Join("/", _path.Split('/').SkipLast(1)), Kind); // Creates arrays!
-    
+
 // ✅ PREFER: Direct span-based parsing
 public RemotePath GetDirectoryName()
 {
@@ -71,7 +71,7 @@ public class WslPathMapper : IPathMapper
 {
     private readonly string _uncPrefix;
     private readonly int _uncPrefixLength;
-    
+
     // Cache for frequently accessed paths (workspace root, target dir)
     private readonly ConcurrentDictionary<int, PathEx> _remoteToLocalCache;
     private readonly ConcurrentDictionary<int, RemotePath> _localToRemoteCache;
@@ -103,7 +103,7 @@ public ValueTask<bool> FileExistsAsync(RemotePath path, CancellationToken ct)
     // Return cached result synchronously when available
     if (_fileExistsCache.TryGetValue(path, out var exists))
         return new ValueTask<bool>(exists);
-    
+
     return new ValueTask<bool>(FileExistsAsyncCore(path, ct));
 }
 
@@ -3735,11 +3735,52 @@ After completing spikes, use this matrix to choose approach:
 
 ---
 
-*Document Version: 5.0*
+*Document Version: 5.1*
 *Last Updated: December 2024*
-*Status: Design Complete - Ready for Implementation*
+*Status: Phase R0 Implementation Complete*
+
+## Implementation Status
+
+### Phase R0 - Infrastructure Foundation ✅ COMPLETE
+
+All foundational abstractions have been implemented:
+
+| Component | File | Status |
+|-----------|------|--------|
+| `TargetKind` enum | `src/RustAnalyzer.Remote/TargetKind.cs` | ✅ |
+| `RemotePath` struct | `src/RustAnalyzer.Remote/RemotePath.cs` | ✅ |
+| `IPathMapper` interface | `src/RustAnalyzer.Remote/IPathMapper.cs` | ✅ |
+| `LocalPathMapper` | `src/RustAnalyzer.Remote/LocalPathMapper.cs` | ✅ |
+| `WslPathMapper` | `src/RustAnalyzer.Remote/WslPathMapper.cs` | ✅ |
+| `IProcessOutputSink` | `src/RustAnalyzer.Remote/IProcessOutputSink.cs` | ✅ |
+| `ProcessResult` | `src/RustAnalyzer.Remote/ProcessResult.cs` | ✅ |
+| `ExecutionCapabilities` | `src/RustAnalyzer.Remote/ExecutionCapabilities.cs` | ✅ |
+| `IExecutionContext` interface | `src/RustAnalyzer.Remote/IExecutionContext.cs` | ✅ |
+| `LocalExecutionContext` | `src/RustAnalyzer.Remote/LocalExecutionContext.cs` | ✅ |
+| `WslExecutionContext` | `src/RustAnalyzer.Remote/WslExecutionContext.cs` | ✅ |
+| `ITargetSystem` interface | `src/RustAnalyzer.Remote/ITargetSystem.cs` | ✅ |
+| `LocalTargetSystem` | `src/RustAnalyzer.Remote/LocalTargetSystem.cs` | ✅ |
+| `WslTargetSystem` | `src/RustAnalyzer.Remote/WslTargetSystem.cs` | ✅ |
+| `TargetChangedEventArgs` | `src/RustAnalyzer.Remote/TargetChangedEventArgs.cs` | ✅ |
+| `ITargetSystemService` interface | `src/RustAnalyzer.Remote/ITargetSystemService.cs` | ✅ |
+| `TargetSystemService` | `src/RustAnalyzer.Remote/TargetSystemService.cs` | ✅ |
+| Feature flags in `Options.cs` | `src/RustAnalyzer/Infrastructure/Options.cs` | ✅ |
+| `TargetSystemCommands` update | `src/RustAnalyzer/Shell/TargetSystemCommands.cs` | ✅ |
+| Unit tests | `src/RustAnalyzer.Remote.UnitTests/*.cs` | ✅ |
+
+### Phase R1 - WSL Build/Clean/Fmt/Clippy ⏳ PENDING
+
+Next steps:
+- Route `ToolchainService` through `IExecutionContext`
+- Update `BuildJsonOutputParser` for path mapping
+- WSL prerequisites checking
+
+### Phases R2-R5 ⏳ PENDING
+
+---
 
 **Changelog:**
+- v5.1: Phase R0 implementation complete with all foundational abstractions
 - v5.0: Major update based on VS 2026 Remote File Explorer investigation:
   - Added VS 2026-first development strategy
   - Documented Remote File Explorer capabilities and "Open" command disabled state
