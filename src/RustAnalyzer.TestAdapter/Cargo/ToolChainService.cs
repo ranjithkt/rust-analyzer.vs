@@ -308,35 +308,58 @@ public sealed class ToolchainService : IToolchainService
                 var remoteManifestPath = GetRemoteManifestPath(manifestPath, pathMapper);
                 var remoteWorkingDir = pathMapper.MapToRemote(manifestPath.GetDirectoryName());
 
+                _tl.L.WriteLine("[Remote] Getting workspace metadata for {0} (remote: {1})", manifestPath, remoteManifestPath);
+
                 // Try with --offline first, then retry without if it fails
                 var argsOffline = new[] { "metadata", "--no-deps", "--format-version", "1", "--manifest-path", remoteManifestPath, "--offline" };
 
-                var result = await executionContext.ExecuteAndCaptureAsync(
+                // Use ExecuteAsync to capture both stdout and stderr
+                var result = await executionContext.ExecuteAsync(
                     executionContext.CargoCommand,
                     argsOffline,
                     remoteWorkingDir,
+                    environment: null,
+                    outputSink: null,
                     ct).ConfigureAwait(false);
 
-                var json = string.Join(string.Empty, result);
+                var json = string.Join(string.Empty, result.StandardOutput);
+                var stderr = string.Join("\n", result.StandardError.Where(l => !string.IsNullOrWhiteSpace(l)));
 
                 // If offline mode returned empty (no cached crates), retry without --offline
                 if (string.IsNullOrWhiteSpace(json) || !json.TrimStart().StartsWith("{", StringComparison.Ordinal))
                 {
-                    _tl.L.WriteLine("[Remote] cargo metadata --offline returned empty, retrying without --offline...");
+                    _tl.L.WriteLine("[Remote] cargo metadata --offline returned empty (exit={0}), retrying without --offline...", result.ExitCode);
+                    if (!string.IsNullOrWhiteSpace(stderr))
+                    {
+                        _tl.L.WriteLine("[Remote] stderr: {0}", stderr);
+                    }
 
                     var argsOnline = new[] { "metadata", "--no-deps", "--format-version", "1", "--manifest-path", remoteManifestPath };
-                    result = await executionContext.ExecuteAndCaptureAsync(
+                    result = await executionContext.ExecuteAsync(
                         executionContext.CargoCommand,
                         argsOnline,
                         remoteWorkingDir,
+                        environment: null,
+                        outputSink: null,
                         ct).ConfigureAwait(false);
 
-                    json = string.Join(string.Empty, result);
+                    json = string.Join(string.Empty, result.StandardOutput);
+                    stderr = string.Join("\n", result.StandardError.Where(l => !string.IsNullOrWhiteSpace(l)));
                 }
 
                 if (string.IsNullOrWhiteSpace(json))
                 {
-                    throw new InvalidOperationException($"cargo metadata returned empty output for {remoteManifestPath}. Check that the manifest path is correct and cargo is installed in the remote environment.");
+                    var errorMsg = $"cargo metadata returned empty output for {remoteManifestPath}.\nExit code: {result.ExitCode}";
+                    if (!string.IsNullOrWhiteSpace(stderr))
+                    {
+                        errorMsg += $"\nError: {stderr}";
+                    }
+                    else
+                    {
+                        errorMsg += "\nCheck that the manifest path is correct and cargo is installed in the remote environment.";
+                    }
+
+                    throw new InvalidOperationException(errorMsg);
                 }
 
                 var rawWorkspace = JsonConvert.DeserializeObject<RawWorkspace>(json);
