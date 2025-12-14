@@ -294,7 +294,8 @@
 
   <Symbols>
     <!-- UI Context GUIDs for visibility constraints -->
-    <GuidSymbol name="UICONTEXT_FolderOpened" value="{6A8A7E9B-85C1-4C25-8EBD-9A8E3DF3C0A2}" />
+    <!-- CORRECT GUID from VSConstants.UICONTEXT.FolderOpened_guid -->
+    <GuidSymbol name="UICONTEXT_FolderOpened" value="{A2392464-49A9-4F9A-AB10-0D11B6D189AA}" />
 
     <GuidSymbol name="guidRustAnalyzerImageCatalog" value="{9cc00aac-3dd7-49a7-9c33-502dde9199f7}">
       <IDSymbol name="IdIRust" value="1"/>
