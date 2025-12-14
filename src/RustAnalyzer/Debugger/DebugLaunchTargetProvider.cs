@@ -284,6 +284,9 @@ public sealed class DebugLaunchTargetProvider : ILaunchDebugTargetProvider
         }
     }
 
+    // GUID for MIEngine (GDB debugging) - from Visual Studio SDK documentation
+    private static readonly Guid MIEngineGuid = new Guid("F5E0DC5C-4EBD-4E4A-B1A9-9D1E9A1E0D22");
+
     private async Task LaunchWslDebugTargetAsync(
         IServiceProvider serviceProvider,
         ITargetSystem targetSystem,
@@ -294,39 +297,35 @@ public sealed class DebugLaunchTargetProvider : ILaunchDebugTargetProvider
         __VSDBGLAUNCHFLAGS noDebugFlag,
         CancellationToken ct)
     {
-        // WSL debugging using Visual Studio's native support (VS 2022 17.0+)
-        // This uses the "WSL" debug transport
+        // WSL debugging using MIEngine (GDB)
+        // This requires the "Linux development with C++" workload in VS
 
         L.WriteLine("Starting WSL debug session for: {0}", remoteProcessPath);
 
-        // Build the WSL debug target info
-        // Note: This requires the "Linux development with C++" workload in VS
-
         var wslDistro = targetSystem.Id.Replace("wsl:", "");
 
-        // For WSL2, use the native WSL debugging support in VS
-        // We launch the process via wsl.exe and attach the native debugger
-        var wslExePath = @"C:\Windows\System32\wsl.exe";
-        var wslArgs = $"-d {wslDistro} --cd \"{remoteWorkingDir}\" -- \"{remoteProcessPath}\" {args}";
+        // Use MIEngine with WSL transport
+        // Format: SSH:wsl+<DistroName> for the remote machine
+        var remoteMachine = $"SSH:wsl+{wslDistro}";
 
         var info = new VsDebugTargetInfo
         {
             dlo = DEBUG_LAUNCH_OPERATION.DLO_CreateProcess,
-            bstrExe = wslExePath,
-            bstrCurDir = remoteWorkingDir.ToString().Replace("/", @"\"),
-            bstrArg = wslArgs,
+            bstrExe = remoteProcessPath.ToString(),  // Linux path to executable
+            bstrCurDir = remoteWorkingDir.ToString(),  // Linux working directory
+            bstrArg = args ?? string.Empty,
             bstrEnv = string.IsNullOrEmpty(env) ? null : env,
             bstrOptions = null,
             bstrPortName = null,
             bstrMdmRegisteredName = null,
-            bstrRemoteMachine = null,
+            bstrRemoteMachine = remoteMachine,  // WSL connection string
             cbSize = (uint)System.Runtime.InteropServices.Marshal.SizeOf<VsDebugTargetInfo>(),
             grfLaunch = (uint)(noDebugFlag | __VSDBGLAUNCHFLAGS.DBGLAUNCH_Silent | __VSDBGLAUNCHFLAGS.DBGLAUNCH_StopDebuggingOnEnd),
             fSendStdoutToOutputWindow = 0,
-            clsidCustom = DebugEnginesGuids.NativeOnly_guid,
+            clsidCustom = MIEngineGuid,  // Use MIEngine (GDB) instead of NativeOnly
         };
 
-        L.WriteLine("WSL debug command: {0} {1}", wslExePath, wslArgs);
+        L.WriteLine("WSL debug: exe={0}, cwd={1}, remote={2}", remoteProcessPath, remoteWorkingDir, remoteMachine);
 
         try
         {
@@ -339,7 +338,10 @@ public sealed class DebugLaunchTargetProvider : ILaunchDebugTargetProvider
             // Show a helpful message about alternative debugging options
             await VsCommon.ShowMessageBoxAsync(
                 $"WSL debugging failed.\n\n" +
-                $"Alternative: You can debug manually using gdbserver:\n\n" +
+                $"Make sure you have installed:\n" +
+                $"1. Visual Studio's 'Linux development with C++' workload\n" +
+                $"2. GDB in WSL: sudo apt install gdb\n\n" +
+                $"Alternative: Debug manually using gdbserver:\n" +
                 $"1. In WSL terminal, run:\n" +
                 $"   gdbserver :1234 {remoteProcessPath} {args}\n\n" +
                 $"2. In VS, attach to 'localhost:1234' using MIEngine.\n\n" +
