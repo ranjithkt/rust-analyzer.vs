@@ -232,7 +232,9 @@ public sealed class SshExecutionContext : IExecutionContext
         var sb = new StringBuilder();
 
         // Add cd to working directory
-        sb.Append($"cd \"{workingDirectory}\" && ");
+        // Use double quotes but $HOME will still expand in double quotes in bash
+        var workingDirStr = (string)workingDirectory;
+        sb.Append($"cd \"{workingDirStr}\" && ");
 
         // Add environment variables
         if (environment != null && environment.Count > 0)

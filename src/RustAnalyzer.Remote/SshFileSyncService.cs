@@ -290,7 +290,17 @@ public sealed class SshFileSyncService : ISshFileSyncService
         sshArgs.Add("BatchMode=yes");
 
         sshArgs.Add($"{connectionInfo.Username}@{connectionInfo.Host}");
-        sshArgs.Add($"mkdir -p \"{remoteDir}\"");
+
+        // Use eval to expand $HOME in the path, and don't quote the entire path if it contains $HOME
+        var remoteDirStr = (string)remoteDir;
+        if (remoteDirStr.Contains("$HOME"))
+        {
+            sshArgs.Add($"mkdir -p {remoteDirStr}");
+        }
+        else
+        {
+            sshArgs.Add($"mkdir -p \"{remoteDirStr}\"");
+        }
 
         using var proc = ProcessRunner.Run("ssh", sshArgs.ToArray(), workingDirectory: null, env: null, ct);
         await proc;
@@ -332,12 +342,31 @@ public sealed class SshFileSyncService : ISshFileSyncService
         // Source file
         scpArgs.Add((string)localFile);
 
-        // Destination
-        scpArgs.Add($"{connectionInfo.Username}@{connectionInfo.Host}:{remoteFile}");
+        // Destination - convert $HOME back to ~ for scp (which expands ~ on the remote side)
+        var remoteFileStr = ConvertHomeForScp((string)remoteFile);
+        scpArgs.Add($"{connectionInfo.Username}@{connectionInfo.Host}:{remoteFileStr}");
 
         using var proc = ProcessRunner.Run("scp", scpArgs.ToArray(), workingDirectory: null, env: null, ct);
         var exitCode = await proc;
         return exitCode == 0;
+    }
+
+    /// <summary>
+    /// Converts $HOME to ~ for use with scp, which expands ~ on the remote side.
+    /// </summary>
+    private static string ConvertHomeForScp(string path)
+    {
+        if (path.StartsWith("$HOME/", StringComparison.Ordinal))
+        {
+            return "~" + path.Substring(5);
+        }
+
+        if (path.StartsWith("$HOME", StringComparison.Ordinal) && path.Length == 5)
+        {
+            return "~";
+        }
+
+        return path;
     }
 
     private static async Task<bool> CopyDirectoryFromRemoteAsync(

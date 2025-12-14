@@ -67,6 +67,16 @@ public sealed class ToolchainService : IToolchainService
             if (executionContext.Kind == TargetKind.Ssh && pathMapper is LocalToRemoteSyncMapper syncMapper)
             {
                 _tl.L.WriteLine("[SSH] LocalSync mode detected. Syncing files to remote...");
+                bos.OutputSink?.Clear();
+
+                // Create redirector to write sync status to output window
+                var syncRedirector = new BuildOutputRedirector(bos.OutputSink, bti.ManifestPath.GetDirectoryName(), null, null);
+                syncRedirector.WriteLineWithoutProcessing(string.Empty);
+                syncRedirector.WriteLineWithoutProcessing("==== SSH Sync: Started ====");
+                syncRedirector.WriteLineWithoutProcessing($"       Local : {syncMapper.LocalRoot}");
+                syncRedirector.WriteLineWithoutProcessing($"      Remote : {syncMapper.RemoteRoot}");
+                syncRedirector.WriteLineWithoutProcessing($"  Connection : {syncMapper.ConnectionInfo.DisplayName}");
+                syncRedirector.WriteLineWithoutProcessing(string.Empty);
 
                 var syncResult = await _syncService.SyncToRemoteAsync(
                     syncMapper.LocalRoot,
@@ -78,11 +88,20 @@ public sealed class ToolchainService : IToolchainService
                 if (!syncResult.Success)
                 {
                     _tl.L.WriteLine("[SSH] Sync failed: {0}", syncResult.ErrorMessage);
+                    syncRedirector.WriteLineWithoutProcessing($"==== SSH Sync: Failed ====");
+                    syncRedirector.WriteLineWithoutProcessing($"  Error: {syncResult.ErrorMessage}");
+                    syncRedirector.WriteLineWithoutProcessing(string.Empty);
                     return false;
                 }
 
                 _tl.L.WriteLine("[SSH] Sync completed: {0} files synced, {1} skipped, {2} bytes in {3}ms",
                     syncResult.FilesSynced, syncResult.FilesSkipped, syncResult.BytesTransferred, syncResult.Duration.TotalMilliseconds);
+                syncRedirector.WriteLineWithoutProcessing($"==== SSH Sync: Completed ====");
+                syncRedirector.WriteLineWithoutProcessing($"  Files synced: {syncResult.FilesSynced}");
+                syncRedirector.WriteLineWithoutProcessing($"  Files skipped: {syncResult.FilesSkipped}");
+                syncRedirector.WriteLineWithoutProcessing($"  Bytes transferred: {syncResult.BytesTransferred}");
+                syncRedirector.WriteLineWithoutProcessing($"  Duration: {syncResult.Duration.TotalMilliseconds:F0}ms");
+                syncRedirector.WriteLineWithoutProcessing(string.Empty);
             }
 
             // Remote execution

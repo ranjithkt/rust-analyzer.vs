@@ -28,11 +28,13 @@ public sealed class LocalToRemoteSyncMapper : IPathMapper
         _connectionInfo = connectionInfo ?? throw new ArgumentNullException(nameof(connectionInfo));
         _localRoot = localRoot;
 
-        // Expand ~ to actual home path if needed (will be resolved at runtime)
+        // Replace ~ with $HOME so it expands properly even in quoted strings
         var projectName = localRoot.GetFileName();
-        var expandedBasePath = remoteSyncBasePath.StartsWith("~", StringComparison.Ordinal)
-            ? remoteSyncBasePath
-            : remoteSyncBasePath;
+        var expandedBasePath = remoteSyncBasePath.StartsWith("~/", StringComparison.Ordinal)
+            ? "$HOME" + remoteSyncBasePath.Substring(1)
+            : remoteSyncBasePath.StartsWith("~", StringComparison.Ordinal)
+                ? "$HOME" + remoteSyncBasePath.Substring(1)
+                : remoteSyncBasePath;
 
         _remoteRoot = new RemotePath($"{expandedBasePath}/{projectName}", TargetKind.Ssh);
     }
