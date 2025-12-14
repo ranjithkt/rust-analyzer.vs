@@ -85,11 +85,56 @@ public sealed class CmdServices
         // Log the target for debugging
         L?.WriteLine("[CmdServices] Executing toolchain operation on target: {0} (Kind: {1})", currentTarget?.DisplayName ?? "Local", currentTarget?.Kind.ToString() ?? "Local");
 
+        // Validate that the workspace path can be mapped to the target
+        if (currentTarget != null && currentTarget.Kind != TargetKind.Local && pathMapper != null)
+        {
+            if (!pathMapper.IsPathForTarget(manifestPath))
+            {
+                var errorMessage = GetRemotePathMismatchMessage(currentTarget, manifestPath);
+                await VsCommon.ShowMessageBoxAsync(errorMessage, "Remote Build Configuration Error");
+                return;
+            }
+        }
+
         // Map the operation to the remote-aware version
         RemoteToolchainOperation remoteOp = MapToRemoteOperation(op);
 
         // Execute with execution context and path mapper (null for local targets)
         await remoteOp(ToolchainService)(bti, bos, executionContext, pathMapper, CancellationToken.None);
+    }
+
+    /// <summary>
+    /// Gets a user-friendly error message for remote path mismatch.
+    /// </summary>
+    private static string GetRemotePathMismatchMessage(ITargetSystem target, PathEx localPath)
+    {
+        var targetName = target.DisplayName;
+        var targetKind = target.Kind.ToString();
+
+        if (target.Kind == TargetKind.Ssh)
+        {
+            return $"Cannot build on SSH target '{targetName}'.\n\n" +
+                   $"The workspace '{localPath.GetDirectoryName()}' is a local Windows folder, " +
+                   $"but the selected target is an SSH remote host.\n\n" +
+                   $"To build on an SSH target, you need to:\n" +
+                   $"1. Open the project from the remote host using Remote File Explorer\n" +
+                   $"   (View > Other Windows > Remote File Explorer), or\n" +
+                   $"2. Switch to 'Local Machine' target to build locally.\n\n" +
+                   $"Note: The code must exist on the remote machine for SSH builds.";
+        }
+        else if (target.Kind == TargetKind.Wsl)
+        {
+            return $"Cannot build on WSL target '{targetName}'.\n\n" +
+                   $"The workspace '{localPath.GetDirectoryName()}' is a local Windows folder, " +
+                   $"but the selected target is WSL.\n\n" +
+                   $"To build on WSL, you can:\n" +
+                   $"1. Open the project from WSL using a UNC path like:\n" +
+                   $"   \\\\wsl$\\{targetName}\\path\\to\\project\n" +
+                   $"2. Or switch to 'Local Machine' target to build locally.";
+        }
+
+        return $"Cannot build on {targetKind} target '{targetName}'.\n\n" +
+               $"The workspace path is not compatible with the selected target.";
     }
 
     /// <summary>
