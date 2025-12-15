@@ -276,10 +276,14 @@ public static class ToolchainServiceExtensions
         var linuxWorkingDir = wslInfo.ToLinuxPath(workingDirectory);
         var wslExePath = WslInfo.GetWslExePath();
 
-        // Build wsl.exe arguments: -d <distro> --cd <dir> -- <command> <args>
-        var wslArgs = new[] { "-d", wslInfo.DistroName, "--cd", linuxWorkingDir, "--", toolName }.Concat(args.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries)).ToArray();
+        // Build wsl.exe arguments: -d <distro> --cd <dir> --exec <command> <args...>
+        // IMPORTANT: do not use naive string.Split(' ') because args can contain quoted values.
+        var splitArgs = SplitCommandLineArgs(args);
+        var wslArgs = new[] { "-d", wslInfo.DistroName, "--cd", linuxWorkingDir, "--exec", toolName }
+            .Concat(splitArgs)
+            .ToArray();
 
-        using var proc = ProcessRunner.Run(wslExePath, wslArgs, null, ImmutableDictionary<string, string>.Empty, ct);
+        using var proc = ProcessRunner.Run(wslExePath, wslArgs, Environment.SystemDirectory, ImmutableDictionary<string, string>.Empty, ct);
 
         var ec = await proc;
         var output = proc.StandardOutputLines.Concat(proc.StandardErrorLines).ToArray();
@@ -313,9 +317,9 @@ public static class ToolchainServiceExtensions
         wslArgs.Add(command);
         wslArgs.AddRange(args);
 
-        // Note: We pass null for working directory since wsl.exe handles --cd internally
-        // Environment variables are not directly passed; WSL inherits Windows environment
-        return ProcessRunner.Run(wslExePath, wslArgs.ToArray(), null, env ?? ImmutableDictionary<string, string>.Empty, ct);
+        // NOTE: ProcessStartInfo.WorkingDirectory must be a valid Windows directory.
+        // wsl.exe handles the Linux-side cwd via --cd, but we still set a safe Windows cwd here.
+        return ProcessRunner.Run(wslExePath, wslArgs.ToArray(), Environment.SystemDirectory, env ?? ImmutableDictionary<string, string>.Empty, ct);
     }
 
     /// <summary>
@@ -339,7 +343,7 @@ public static class ToolchainServiceExtensions
         var wslExePath = WslInfo.GetWslExePath();
         var wslArgs = new[] { "-d", wslInfo.DistroName, "--cd", linuxWorkingDir, "--exec", "rustc", "--print", "sysroot" };
 
-        using var proc = ProcessRunner.Run(wslExePath, wslArgs, null, ImmutableDictionary<string, string>.Empty, ct);
+        using var proc = ProcessRunner.Run(wslExePath, wslArgs, Environment.SystemDirectory, ImmutableDictionary<string, string>.Empty, ct);
         var ec = await proc;
 
         if (ec != 0 || !proc.StandardOutputLines.Any())
@@ -355,7 +359,7 @@ public static class ToolchainServiceExtensions
 
         // Get the target triple
         var tripleArgs = new[] { "-d", wslInfo.DistroName, "--cd", linuxWorkingDir, "--exec", "rustc", "-vV" };
-        using var tripleProc = ProcessRunner.Run(wslExePath, tripleArgs, null, ImmutableDictionary<string, string>.Empty, ct);
+        using var tripleProc = ProcessRunner.Run(wslExePath, tripleArgs, Environment.SystemDirectory, ImmutableDictionary<string, string>.Empty, ct);
         var tripleEc = await tripleProc;
 
         var targetTriple = "x86_64-unknown-linux-gnu"; // Default fallback
@@ -371,6 +375,51 @@ public static class ToolchainServiceExtensions
         var lib = $"{sysroot}/lib/rustlib/{targetTriple}/lib";
 
         return (bin, lib);
+    }
+
+    /// <summary>
+    /// Splits a command-line argument string into tokens, respecting double quotes.
+    /// This is intentionally simple but avoids the most common WSL breakage from string.Split(' ').
+    /// </summary>
+    private static IEnumerable<string> SplitCommandLineArgs(string args)
+    {
+        if (string.IsNullOrWhiteSpace(args))
+        {
+            return Array.Empty<string>();
+        }
+
+        var result = new List<string>();
+        var current = new StringBuilder();
+        var inQuotes = false;
+
+        for (int i = 0; i < args.Length; i++)
+        {
+            var c = args[i];
+            if (c == '"')
+            {
+                inQuotes = !inQuotes;
+                continue;
+            }
+
+            if (char.IsWhiteSpace(c) && !inQuotes)
+            {
+                if (current.Length > 0)
+                {
+                    result.Add(current.ToString());
+                    current.Clear();
+                }
+                continue;
+            }
+
+            current.Append(c);
+        }
+
+        if (current.Length > 0)
+        {
+            result.Add(current.ToString());
+        }
+
+        return result;
     }
 
     public static async Task<string> GetCommandOutputSingleLine(string opName, string versionArgs, PathEx workingDirectory, CancellationToken ct)

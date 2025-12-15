@@ -13,6 +13,7 @@ using Microsoft.VisualStudio.ComponentModelHost;
 using Microsoft.VisualStudio.Imaging;
 using Microsoft.VisualStudio.Shell;
 using Microsoft.VisualStudio.Threading;
+using Microsoft.VisualStudio.Workspace.VSIntegration.Contracts;
 using CommunityVS = Community.VisualStudio.Toolkit.VS;
 using Constants = KS.RustAnalyzer.TestAdapter.Constants;
 
@@ -74,7 +75,31 @@ public sealed class RustAnalyzerPackage : ToolkitPackage
 
         await ReleaseSummaryNotification.ShowAsync(_regSettings, _tl);
         await SearchAndDisableIncompatibleExtensionsAsync();
-        await _preReqs.SatisfyAsync(cancellationToken);
+
+        // Workspace-aware prerequisite checks:
+        // - For Windows workspaces, keep existing checks (cargo.exe/rustup.exe on Windows).
+        // - For WSL UNC workspaces, validate wsl.exe + toolchain inside the distro (no cargo.exe required on Windows).
+        try
+        {
+            var cmServiceProvider = (IComponentModel)await GetServiceAsync(typeof(SComponentModel));
+            var folderWorkspaceService = cmServiceProvider?.GetService<IVsFolderWorkspaceService>();
+            var workspaceRoot = folderWorkspaceService?.CurrentWorkspace?.Location;
+
+            if (!string.IsNullOrWhiteSpace(workspaceRoot))
+            {
+                await _preReqs.SatisfyForWorkspaceAsync((PathEx)workspaceRoot, cancellationToken);
+            }
+            else
+            {
+                await _preReqs.SatisfyAsync(cancellationToken);
+            }
+        }
+        catch
+        {
+            // Fall back to existing behavior if workspace root detection fails.
+            await _preReqs.SatisfyAsync(cancellationToken);
+        }
+
         await _raDownloader.InstallLatestAsync();
         await RlsUpdatedNotification.ShowAsync();
     }

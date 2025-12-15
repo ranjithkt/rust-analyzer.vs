@@ -76,26 +76,38 @@ public sealed class PreReqsCheckService : IPreReqsCheckService
 
     public async Task SatisfyForWorkspaceAsync(PathEx workspaceRoot, CancellationToken ct)
     {
-        // Check if this is a WSL workspace
+        // If this isn't a WSL workspace, fall back to the existing Windows checks.
         if (!WslInfo.TryParse(workspaceRoot, out var wslInfo))
         {
-            // Not a WSL workspace - standard checks already passed in SatisfyAsync
+            await SatisfyAsync(ct);
             return;
         }
 
-        var results = await DoWslChecksAsync(wslInfo, ct);
+        // WSL workspace: do NOT require cargo.exe/rustup.exe on Windows.
+        // Still require a compatible VS version.
+        var results = new List<(bool Success, string Message)>();
+
+        _tl.L.WriteLine("Running WSL PreReqCheck: VsVersionCheck...");
+        var (vsSuccess, vsMessage) = await VsVersionCheck.CheckAsync(_cargoService, ct);
+        if (!vsSuccess)
+        {
+            results.Add((vsSuccess, vsMessage));
+        }
+
+        results.AddRange(await DoWslChecksAsync(wslInfo, ct));
 
         var failures = results.Where(x => !x.Success);
         if (failures.Any())
         {
             var line1 = failures
                 .Aggregate(
-                    new StringBuilder($"WSL prerequisite check(s) failed for distro '{wslInfo.DistroName}':"),
+                    new StringBuilder($"Prerequisite check(s) failed for WSL distro '{wslInfo.DistroName}':"),
                     (acc, e) => acc.AppendLine().AppendFormat("- {0}", e.Message))
                 .ToString();
+
             await VsCommon.ShowMessageBoxAsync(
                 line1,
-                $"Please ensure WSL is properly configured and Rust toolchain is installed inside WSL distro '{wslInfo.DistroName}'.");
+                $"Please ensure WSL is properly configured and the Rust toolchain is installed inside WSL distro '{wslInfo.DistroName}'.");
         }
     }
 
@@ -160,7 +172,7 @@ public sealed class PreReqsCheckService : IPreReqsCheckService
             var wslExePath = WslInfo.GetWslExePath();
             var wslArgs = new[] { "-d", wslInfo.DistroName, "--exec", Constants.WslCargoExe, "--version" };
 
-            using var proc = ProcessRunner.Run(wslExePath, wslArgs, null, ImmutableDictionary<string, string>.Empty, ct);
+            using var proc = ProcessRunner.Run(wslExePath, wslArgs, Environment.SystemDirectory, ImmutableDictionary<string, string>.Empty, ct);
             var ec = await proc;
 
             if (ec == 0 && proc.StandardOutputLines.Any())
@@ -182,7 +194,7 @@ public sealed class PreReqsCheckService : IPreReqsCheckService
             var wslExePath = WslInfo.GetWslExePath();
             var wslArgs = new[] { "-d", wslInfo.DistroName, "--exec", Constants.WslRustUpExe, "--version" };
 
-            using var proc = ProcessRunner.Run(wslExePath, wslArgs, null, ImmutableDictionary<string, string>.Empty, ct);
+            using var proc = ProcessRunner.Run(wslExePath, wslArgs, Environment.SystemDirectory, ImmutableDictionary<string, string>.Empty, ct);
             var ec = await proc;
 
             if (ec == 0 && proc.StandardOutputLines.Any())

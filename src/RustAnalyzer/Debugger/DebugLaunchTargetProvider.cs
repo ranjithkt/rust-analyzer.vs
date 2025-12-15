@@ -19,7 +19,8 @@ using static Microsoft.VisualStudio.VSConstants;
 namespace KS.RustAnalyzer.Debugger;
 
 // TODO: Workaround for https://github.com/kitamstudios/rust-analyzer.vs/issues/24. Just implementing LaunchDebugTargetProviderOptions.IsRuntimeSupportContext should be enough but it does not work, for now setting priority to low.
-[ExportLaunchDebugTarget(LaunchDebugTargetProviderOptions.IsRuntimeSupportContext, ProviderType, new[] { ".exe" }, ProviderPriority.Lowest)]
+// NOTE: WSL binaries are typically extensionless, so we register for both ".exe" (Windows) and "" (no extension).
+[ExportLaunchDebugTarget(LaunchDebugTargetProviderOptions.IsRuntimeSupportContext, ProviderType, new[] { ".exe", "" }, ProviderPriority.Lowest)]
 public sealed class DebugLaunchTargetProvider : ILaunchDebugTargetProvider
 {
     public const string ProviderType = "{72D3FCEF-1111-4266-B8DD-D3ED06E35A2B}";
