@@ -35,12 +35,8 @@ public abstract class BaseToolchainCommand<T> : BaseCommand<T>
             // VS 2026 Open Folder selection can be transient; don't rely solely on selection.
             // Prefer selected Cargo.toml, otherwise fall back to workspace root Cargo.toml.
             var selectedItems = CmdServices.GetSelectedItems();
-            PathEx manifest;
-            if (selectedItems.Count() == 1 && selectedItems.First().IsManifest() && selectedItems.First().FileExists())
-            {
-                manifest = selectedItems.First();
-            }
-            else
+            var manifest = selectedItems.FirstOrDefault(p => p.IsManifest() && p.FileExists());
+            if (string.IsNullOrWhiteSpace((string)manifest))
             {
                 manifest = CmdServices.GetWorkspaceRoot() + Constants.ManifestFileName2;
             }
@@ -60,8 +56,14 @@ public abstract class BaseToolchainCommand<T> : BaseCommand<T>
     {
         await RustAnalyzerPackage.JTF.SwitchToMainThreadAsync();
 
-        var selectedPath = CmdServices.GetSelectedItems().FirstOrDefault();
-        await CmdServices.ExecuteToolchainOperationAsync(Operation, selectedPath, GetOptions);
+        var selectedItems = CmdServices.GetSelectedItems();
+        var manifest = selectedItems.FirstOrDefault(p => p.IsManifest() && p.FileExists());
+        if (string.IsNullOrWhiteSpace((string)manifest))
+        {
+            manifest = CmdServices.GetWorkspaceRoot() + Constants.ManifestFileName2;
+        }
+
+        await CmdServices.ExecuteToolchainOperationAsync(Operation, manifest, GetOptions);
     }
 }
 
@@ -113,6 +115,14 @@ public abstract class BaseBuildToolChainCommand<T> : BaseCommand<T>
     protected PathEx GetManifestPath()
     {
         ThreadHelper.ThrowIfNotOnUIThread();
+
+        // Prefer selected Cargo.toml if user invoked the command from a specific crate.
+        var selectedItems = CmdServices.GetSelectedItems();
+        var selectedManifest = selectedItems.FirstOrDefault(p => p.IsManifest() && p.FileExists());
+        if (!string.IsNullOrWhiteSpace((string)selectedManifest))
+        {
+            return selectedManifest;
+        }
 
         return CmdServices.GetWorkspaceRoot() + Constants.ManifestFileName2;
     }

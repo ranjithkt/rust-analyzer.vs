@@ -121,12 +121,14 @@ public sealed class RustAnalyzerPackage : ToolkitPackage
                         {
                             Environment.SetEnvironmentVariable(Constants.RAVsTargetSystem, "wsl", EnvironmentVariableTarget.Process);
                             Environment.SetEnvironmentVariable(Constants.RAVsWslDistroName, distro.Trim(), EnvironmentVariableTarget.Process);
+                            Environment.SetEnvironmentVariable(Constants.RAVsTargetSystemStampUtcTicks, DateTime.UtcNow.Ticks.ToString(), EnvironmentVariableTarget.Process);
                             TemporaryTargetSystemStore.CurrentTargetSystem = $"WSL: {distro.Trim()}";
                         }
                         else
                         {
                             Environment.SetEnvironmentVariable(Constants.RAVsTargetSystem, "local", EnvironmentVariableTarget.Process);
                             Environment.SetEnvironmentVariable(Constants.RAVsWslDistroName, null, EnvironmentVariableTarget.Process);
+                            Environment.SetEnvironmentVariable(Constants.RAVsTargetSystemStampUtcTicks, DateTime.UtcNow.Ticks.ToString(), EnvironmentVariableTarget.Process);
                             TemporaryTargetSystemStore.CurrentTargetSystem = "Local Machine";
                         }
                     }

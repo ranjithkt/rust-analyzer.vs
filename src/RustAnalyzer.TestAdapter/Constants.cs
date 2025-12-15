@@ -35,6 +35,9 @@ public static class Constants
     // - RAVsWslDistroName = "<DistroName>" (only meaningful when RAVsTargetSystem == "wsl")
     public const string RAVsTargetSystem = "RAVsTargetSystem";
     public const string RAVsWslDistroName = "RAVsWslDistroName";
+    // Monotonic stamp (UTC ticks) updated whenever target system selection changes.
+    // Used to invalidate VS workspace scanner caches across target switches.
+    public const string RAVsTargetSystemStampUtcTicks = "RAVsTargetSystemStampUtcTicks";
 
     public const string ExecutorUriString = "executor://RustTestExecutor/v1";
 

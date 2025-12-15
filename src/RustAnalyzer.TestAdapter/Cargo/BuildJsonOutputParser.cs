@@ -75,12 +75,20 @@ public static class BuildJsonOutputParser
             return new BuildMessage[] { CreateBuildMessage(workspaceRoot, obj) };
         }
 
-        return (obj.message.spans as IEnumerable<dynamic>).Select(
-            s =>
-            {
-                DetailedBuildMessage msg = CreateBuildMessage(workspaceRoot, obj, s.file_name, s.line_start, s.column_start);
-                return msg;
-            }).ToArray();
+        // rustc often provides many spans for a single diagnostic (e.g., one per field),
+        // but the rendered message text is identical. Emitting one message per span floods
+        // the Output window with duplicates. Prefer the primary span (or the first span).
+        var spans = (obj.message.spans as IEnumerable<dynamic>)?.ToArray() ?? Array.Empty<dynamic>();
+        if (spans.Length == 0)
+        {
+            return new BuildMessage[] { CreateBuildMessage(workspaceRoot, obj) };
+        }
+
+        dynamic primary = spans.FirstOrDefault(s => s != null && s.is_primary != null && (bool)s.is_primary.Value) ?? spans[0];
+        return new BuildMessage[]
+        {
+            CreateBuildMessage(workspaceRoot, obj, primary.file_name, primary.line_start, primary.column_start),
+        };
     }
 
     private static int GetIntValue(dynamic obj, int defaultValue = default)
@@ -252,18 +260,46 @@ public static class BuildJsonOutputParser
             return Array.Empty<BuildMessage>();
         }
 
-        var matches = CompilerArtifactMessageCracker1.Matches(obj.package_id.Value as string);
+        var packageId = obj.package_id.Value as string;
+        if (string.IsNullOrWhiteSpace(packageId))
+        {
+            return Array.Empty<BuildMessage>();
+        }
+
+        // Local path dependencies (common in workspaces) look like:
+        //   path+file:///mnt/c/Repos/Rust/alpaca-core#0.1.0
+        //   path+file:///mnt/c/Repos/Rust/trader-one/common#0.1.0
+        // Show a friendly "Compiling <name> v<ver>" instead of raw JSON.
+        if (packageId.StartsWith("path+file://", StringComparison.OrdinalIgnoreCase))
+        {
+            var hash = packageId.LastIndexOf('#');
+            if (hash > 0 && hash < packageId.Length - 1)
+            {
+                var version = packageId.Substring(hash + 1);
+                var before = packageId.Substring(0, hash);
+                var name = before.TrimEnd('/').Split('/').LastOrDefault();
+                if (!string.IsNullOrWhiteSpace(name))
+                {
+                    return new[] { new StringBuildMessage { Message = $"   Compiling {name} v{version}" } };
+                }
+            }
+
+            return new[] { new StringBuildMessage { Message = $"   Compiling {packageId}" } };
+        }
+
+        var matches = CompilerArtifactMessageCracker1.Matches(packageId);
         if (matches.Count != 0)
         {
             return new[] { new StringBuildMessage { Message = $"   Compiling {matches[0].Groups[1].Value} v{matches[0].Groups[2].Value} ({matches[0].Groups[4].Value})" } };
         }
 
-        matches = CompilerArtifactMessageCracker2.Matches(obj.package_id.Value as string);
+        matches = CompilerArtifactMessageCracker2.Matches(packageId);
         if (matches.Count != 0)
         {
             return new[] { new StringBuildMessage { Message = $"   Compiling {matches[0].Groups[2].Value} v{matches[0].Groups[3].Value}" } };
         }
 
-        throw new InvalidDataException($"Unable to match. Will be shown as is in the output window.");
+        // Unknown package_id format: be conservative and avoid dumping raw JSON into the output.
+        return new[] { new StringBuildMessage { Message = $"   Compiling {packageId}" } };
     }
 }

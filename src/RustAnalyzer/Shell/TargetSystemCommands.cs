@@ -215,6 +215,8 @@ public sealed class TargetSystemComboCommand : BaseRustAnalyzerCommand<TargetSys
     {
         Environment.SetEnvironmentVariable(TestAdapterConstants.RAVsTargetSystem, mode, EnvironmentVariableTarget.Process);
         Environment.SetEnvironmentVariable(TestAdapterConstants.RAVsWslDistroName, string.IsNullOrWhiteSpace(distro) ? null : distro, EnvironmentVariableTarget.Process);
+        // Stamp used by file scanners to force rescan (debug dropdown refresh) when target system changes.
+        Environment.SetEnvironmentVariable(TestAdapterConstants.RAVsTargetSystemStampUtcTicks, DateTime.UtcNow.Ticks.ToString(), EnvironmentVariableTarget.Process);
     }
 
     private void PersistWorkspaceTargetSystem(string mode, string distro)
