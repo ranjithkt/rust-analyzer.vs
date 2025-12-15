@@ -2,16 +2,20 @@ using System;
 using System.ComponentModel.Composition;
 using KS.RustAnalyzer.Infrastructure;
 using KS.RustAnalyzer.TestAdapter.Common;
+using Microsoft.VisualStudio.Shell;
 using Microsoft.VisualStudio.Workspace;
 using Microsoft.VisualStudio.Workspace.Build;
 
 namespace KS.RustAnalyzer.Editor;
 
+// NOTE:
+// ExportFileContextProvider does NOT allow multiple attributes; export both Build and Clean
+// in a single attribute. Use positional args (vs named args) for better cross-version tolerance.
 [ExportFileContextProvider(
-    type: ProviderType,
-    priority: ProviderPriority.Normal,
-    supportedGetContextsTypes: new[] { typeof(string) },
-    supportedContextTypeGuids: new[] { BuildContextTypes.BuildContextType, BuildContextTypes.CleanContextType, })]
+    ProviderType,
+    ProviderPriority.Normal,
+    new[] { typeof(string) },
+    new[] { BuildContextTypes.BuildContextType, BuildContextTypes.CleanContextType, })]
 public sealed class FileContextProviderFactory : IWorkspaceProviderFactory<IFileContextProvider>
 {
     public const string ProviderType = "72D3FCEF-0001-4266-B8DD-D3ED06E35A2B";
@@ -35,6 +39,15 @@ public sealed class FileContextProviderFactory : IWorkspaceProviderFactory<IFile
 
     public IFileContextProvider CreateProvider(IWorkspace workspaceContext)
     {
+        try
+        {
+            ActivityLog.LogInformation("rust-analyzer.vs", $"FileContextProviderFactory.CreateProvider Location='{workspaceContext?.Location}'");
+        }
+        catch
+        {
+            // Best-effort diagnostics only.
+        }
+
         T.TrackEvent(
             "Create Context Provider",
             new[] { ("Location", workspaceContext.Location) });

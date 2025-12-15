@@ -1,22 +1,103 @@
 using System;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.Linq;
 using System.Runtime.InteropServices;
 using Community.VisualStudio.Toolkit;
 using EnsureThat;
-using EnvDTE;
+using KS.RustAnalyzer.Infrastructure;
+using KS.RustAnalyzer.TestAdapter;
+using KS.RustAnalyzer.TestAdapter.Common;
 using Microsoft.VisualStudio.Shell;
+using TestAdapterConstants = KS.RustAnalyzer.TestAdapter.Constants;
 
 namespace KS.RustAnalyzer.Shell;
 
 public static class TemporaryTargetSystemStore
 {
-    public static string[] TargetSystems { get; set; } = { "Local Machine" };
+    private static readonly object Locker = new();
+    private static DateTime _lastRefreshUtc = DateTime.MinValue;
+    private static string[] _cachedTargetSystems = { "Local Machine" };
+
+    public static string[] TargetSystems
+    {
+        get
+        {
+            RefreshIfNeeded();
+            return _cachedTargetSystems;
+        }
+    }
 
     public static string CurrentTargetSystem { get; set; } = TargetSystems[0];
+
+    private static void RefreshIfNeeded()
+    {
+        // Avoid running wsl.exe too frequently; this combo can be queried often.
+        var now = DateTime.UtcNow;
+        if ((now - _lastRefreshUtc) < TimeSpan.FromSeconds(5))
+        {
+            return;
+        }
+
+        lock (Locker)
+        {
+            if ((now - _lastRefreshUtc) < TimeSpan.FromSeconds(5))
+            {
+                return;
+            }
+
+            var systems = new List<string> { "Local Machine" };
+            try
+            {
+                var wslExe = WslInfo.GetWslExePath();
+                var psi = new ProcessStartInfo
+                {
+                    FileName = wslExe,
+                    Arguments = "-l -q",
+                    WorkingDirectory = Environment.SystemDirectory,
+                    UseShellExecute = false,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
+                    CreateNoWindow = true,
+                };
+
+                using var p = Process.Start(psi);
+                if (p != null)
+                {
+                    var stdout = p.StandardOutput.ReadToEnd();
+                    p.WaitForExit(2000);
+                    var distros = stdout
+                        .Split(new[] { "\r\n", "\n" }, StringSplitOptions.RemoveEmptyEntries)
+                        .Select(s => s.Trim())
+                        .Where(s => !string.IsNullOrWhiteSpace(s))
+                        .Distinct(StringComparer.OrdinalIgnoreCase)
+                        .OrderBy(s => s, StringComparer.OrdinalIgnoreCase);
+
+                    systems.AddRange(distros.Select(d => $"WSL: {d}"));
+                }
+            }
+            catch
+            {
+                // Best-effort only.
+            }
+
+            _cachedTargetSystems = systems.ToArray();
+            _lastRefreshUtc = now;
+
+            // Ensure current selection is valid.
+            if (string.IsNullOrWhiteSpace(CurrentTargetSystem) || !_cachedTargetSystems.Contains(CurrentTargetSystem))
+            {
+                CurrentTargetSystem = _cachedTargetSystems[0];
+            }
+        }
+    }
 }
 
 [Command(PackageGuids.guidRustAnalyzerTargetSystemCmdSetString, PackageIds.IdTargetSystemCombo)]
 public sealed class TargetSystemComboCommand : BaseRustAnalyzerCommand<TargetSystemComboCommand>
 {
+    private static bool _loadedFromWorkspaceSettings;
+
     protected override void ExecuteCore(object sender, OleMenuCmdEventArgs eventArgs)
     {
         EnsureArg.IsNotNull(eventArgs);
@@ -28,6 +109,7 @@ public sealed class TargetSystemComboCommand : BaseRustAnalyzerCommand<TargetSys
         // IDE is requesting the current value for the combo.
         if (vOut != IntPtr.Zero)
         {
+            EnsureLoadedFromWorkspaceSettings();
             Marshal.GetNativeVariantForObject(TemporaryTargetSystemStore.CurrentTargetSystem, vOut);
             return;
         }
@@ -36,7 +118,86 @@ public sealed class TargetSystemComboCommand : BaseRustAnalyzerCommand<TargetSys
         if (input != null)
         {
             TemporaryTargetSystemStore.CurrentTargetSystem = input.ToString();
+
+            // Propagate selection to process environment so the TestAdapter layer can read it.
+            // (We keep this process-scoped to avoid impacting other VS instances.)
+            if (TemporaryTargetSystemStore.CurrentTargetSystem.StartsWith("WSL:", StringComparison.OrdinalIgnoreCase))
+            {
+                var distro = TemporaryTargetSystemStore.CurrentTargetSystem.Substring("WSL:".Length).Trim();
+                ApplyProcessTargetSystem("wsl", distro);
+                PersistWorkspaceTargetSystem("wsl", distro);
+            }
+            else
+            {
+                ApplyProcessTargetSystem("local", null);
+                PersistWorkspaceTargetSystem("local", null);
+            }
         }
+    }
+
+    private void EnsureLoadedFromWorkspaceSettings()
+    {
+        ThreadHelper.ThrowIfNotOnUIThread();
+
+        if (_loadedFromWorkspaceSettings)
+        {
+            return;
+        }
+
+        _loadedFromWorkspaceSettings = true;
+
+        var ss = CmdServices.SettingsService;
+        var workspaceRoot = CmdServices.GetWorkspaceRoot();
+        if (ss == null || string.IsNullOrWhiteSpace((string)workspaceRoot))
+        {
+            return;
+        }
+
+        try
+        {
+            var mode = ThreadHelper.JoinableTaskFactory.Run(async () => await ss.GetAsync(SettingsInfo.TypeTargetSystem, workspaceRoot));
+            var distro = ThreadHelper.JoinableTaskFactory.Run(async () => await ss.GetAsync(SettingsInfo.TypeWslDistroName, workspaceRoot));
+
+            if (string.Equals(mode, "wsl", StringComparison.OrdinalIgnoreCase) && !string.IsNullOrWhiteSpace(distro))
+            {
+                TemporaryTargetSystemStore.CurrentTargetSystem = $"WSL: {distro.Trim()}";
+                ApplyProcessTargetSystem("wsl", distro.Trim());
+            }
+            else
+            {
+                TemporaryTargetSystemStore.CurrentTargetSystem = "Local Machine";
+                ApplyProcessTargetSystem("local", null);
+            }
+        }
+        catch
+        {
+            // Best-effort only (never break combo status).
+        }
+    }
+
+    private static void ApplyProcessTargetSystem(string mode, string distro)
+    {
+        Environment.SetEnvironmentVariable(TestAdapterConstants.RAVsTargetSystem, mode, EnvironmentVariableTarget.Process);
+        Environment.SetEnvironmentVariable(TestAdapterConstants.RAVsWslDistroName, string.IsNullOrWhiteSpace(distro) ? null : distro, EnvironmentVariableTarget.Process);
+    }
+
+    private void PersistWorkspaceTargetSystem(string mode, string distro)
+    {
+        ThreadHelper.ThrowIfNotOnUIThread();
+
+        var ss = CmdServices.SettingsService;
+        var workspaceRoot = CmdServices.GetWorkspaceRoot();
+        if (ss == null || string.IsNullOrWhiteSpace((string)workspaceRoot))
+        {
+            return;
+        }
+
+        // Don't block the UI thread; persist best-effort.
+        ThreadHelper.JoinableTaskFactory.RunAsync(async () =>
+        {
+            await ss.SetAsync(SettingsInfo.TypeTargetSystem, workspaceRoot, mode ?? string.Empty);
+            await ss.SetAsync(SettingsInfo.TypeWslDistroName, workspaceRoot, distro ?? string.Empty);
+        });
     }
 }
 

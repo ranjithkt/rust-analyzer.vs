@@ -76,8 +76,9 @@ public sealed class PreReqsCheckService : IPreReqsCheckService
 
     public async Task SatisfyForWorkspaceAsync(PathEx workspaceRoot, CancellationToken ct)
     {
-        // If this isn't a WSL workspace, fall back to the existing Windows checks.
-        if (!WslInfo.TryParse(workspaceRoot, out var wslInfo))
+        // Mode 1: WSL UNC workspace
+        // Mode 2: Windows-local workspace + WSL execution (when user selected a WSL target system)
+        if (!TargetSystemSelection.TryGetWslExecutionContext(workspaceRoot, out var wslInfo, out var distroName))
         {
             await SatisfyAsync(ct);
             return;
@@ -94,24 +95,24 @@ public sealed class PreReqsCheckService : IPreReqsCheckService
             results.Add((vsSuccess, vsMessage));
         }
 
-        results.AddRange(await DoWslChecksAsync(wslInfo, ct));
+        results.AddRange(await DoWslChecksAsync(distroName, ct));
 
         var failures = results.Where(x => !x.Success);
         if (failures.Any())
         {
             var line1 = failures
                 .Aggregate(
-                    new StringBuilder($"Prerequisite check(s) failed for WSL distro '{wslInfo.DistroName}':"),
+                    new StringBuilder($"Prerequisite check(s) failed for WSL distro '{distroName}':"),
                     (acc, e) => acc.AppendLine().AppendFormat("- {0}", e.Message))
                 .ToString();
 
             await VsCommon.ShowMessageBoxAsync(
                 line1,
-                $"Please ensure WSL is properly configured and the Rust toolchain is installed inside WSL distro '{wslInfo.DistroName}'.");
+                $"Please ensure WSL is properly configured and the Rust toolchain is installed inside WSL distro '{distroName}'.");
         }
     }
 
-    private async Task<IEnumerable<(bool Success, string Message)>> DoWslChecksAsync(WslInfo wslInfo, CancellationToken ct)
+    private async Task<IEnumerable<(bool Success, string Message)>> DoWslChecksAsync(string distroName, CancellationToken ct)
     {
         var results = new List<(bool Success, string Message)>();
 
@@ -128,7 +129,7 @@ public sealed class PreReqsCheckService : IPreReqsCheckService
 
         // Check cargo inside WSL
         _tl.L.WriteLine("Running WSL PreReqCheck: CheckCargoInWslAsync...");
-        var (cargoSuccess, cargoMessage) = await CheckCargoInWslAsync(wslInfo, ct);
+        var (cargoSuccess, cargoMessage) = await CheckCargoInWslAsync(distroName, ct);
         if (!cargoSuccess)
         {
             _tl.L.WriteLine("... CheckCargoInWslAsync failed: {0}.", cargoMessage);
@@ -138,7 +139,7 @@ public sealed class PreReqsCheckService : IPreReqsCheckService
 
         // Check rustup inside WSL
         _tl.L.WriteLine("Running WSL PreReqCheck: CheckRustupInWslAsync...");
-        var (rustupSuccess, rustupMessage) = await CheckRustupInWslAsync(wslInfo, ct);
+        var (rustupSuccess, rustupMessage) = await CheckRustupInWslAsync(distroName, ct);
         if (!rustupSuccess)
         {
             _tl.L.WriteLine("... CheckRustupInWslAsync failed: {0}.", rustupMessage);
@@ -165,14 +166,14 @@ public sealed class PreReqsCheckService : IPreReqsCheckService
         return (false, "wsl.exe not found. Please ensure WSL is installed.");
     }
 
-    private static async Task<(bool Success, string Message)> CheckCargoInWslAsync(WslInfo wslInfo, CancellationToken ct)
+    private static async Task<(bool Success, string Message)> CheckCargoInWslAsync(string distroName, CancellationToken ct)
     {
         try
         {
             var wslExePath = WslInfo.GetWslExePath();
             // Direct `wsl.exe --exec cargo` can fail if PATH doesn't include ~/.cargo/bin.
             // Run via a login shell so rustup-installed cargo is discoverable.
-            var wslArgs = new[] { "-d", wslInfo.DistroName, "--exec", "/bin/bash", "-lc", "cargo --version" };
+            var wslArgs = new[] { "-d", distroName, "--exec", "/bin/bash", "-lc", "cargo --version" };
 
             using var proc = ProcessRunner.Run(wslExePath, wslArgs, Environment.SystemDirectory, ImmutableDictionary<string, string>.Empty, ct);
             var ec = await proc;
@@ -186,16 +187,16 @@ public sealed class PreReqsCheckService : IPreReqsCheckService
         {
         }
 
-        return (false, $"cargo not found in WSL distro '{wslInfo.DistroName}'. Please install Rust toolchain inside WSL.");
+        return (false, $"cargo not found in WSL distro '{distroName}'. Please install Rust toolchain inside WSL.");
     }
 
-    private static async Task<(bool Success, string Message)> CheckRustupInWslAsync(WslInfo wslInfo, CancellationToken ct)
+    private static async Task<(bool Success, string Message)> CheckRustupInWslAsync(string distroName, CancellationToken ct)
     {
         try
         {
             var wslExePath = WslInfo.GetWslExePath();
             // Same PATH caveat as cargo; use a login shell.
-            var wslArgs = new[] { "-d", wslInfo.DistroName, "--exec", "/bin/bash", "-lc", "rustup --version" };
+            var wslArgs = new[] { "-d", distroName, "--exec", "/bin/bash", "-lc", "rustup --version" };
 
             using var proc = ProcessRunner.Run(wslExePath, wslArgs, Environment.SystemDirectory, ImmutableDictionary<string, string>.Empty, ct);
             var ec = await proc;
@@ -209,7 +210,7 @@ public sealed class PreReqsCheckService : IPreReqsCheckService
         {
         }
 
-        return (false, $"rustup not found in WSL distro '{wslInfo.DistroName}'. Please install rustup inside WSL.");
+        return (false, $"rustup not found in WSL distro '{distroName}'. Please install rustup inside WSL.");
     }
 
     private async Task<IEnumerable<(bool Success, string Message)>> DoChecksAsync(CancellationToken ct)

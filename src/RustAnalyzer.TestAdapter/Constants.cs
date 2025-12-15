@@ -29,6 +29,13 @@ public static class Constants
     public const string ConfigurationSectionName = "rust-analyzer.vs";
     public const string RAVsVersion = "RAVsVersion";
 
+    // Target system selection (process-scoped; used to force WSL execution for Windows-local workspaces).
+    // Values:
+    // - RAVsTargetSystem = "local" | "wsl"
+    // - RAVsWslDistroName = "<DistroName>" (only meaningful when RAVsTargetSystem == "wsl")
+    public const string RAVsTargetSystem = "RAVsTargetSystem";
+    public const string RAVsWslDistroName = "RAVsWslDistroName";
+
     public const string ExecutorUriString = "executor://RustTestExecutor/v1";
 
     public const string ManifestExtension = ".toml";

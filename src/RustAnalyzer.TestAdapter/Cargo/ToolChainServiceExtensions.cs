@@ -246,10 +246,11 @@ public static class ToolchainServiceExtensions
 
     public static async Task<string[]> GetCommandOutput(string opName, string args, PathEx workingDirectory, CancellationToken ct)
     {
-        // Check if working directory is a WSL path
-        if (WslInfo.TryParse(workingDirectory, out var wslInfo))
+        // Mode 1: WSL UNC workspace
+        // Mode 2: Windows-local workspace + WSL execution (if selected)
+        if (TargetSystemSelection.TryGetWslExecutionContext(workingDirectory, out var wslInfo, out var distroName))
         {
-            return await GetCommandOutputWsl(opName, args, workingDirectory, wslInfo, ct);
+            return await GetCommandOutputWsl(opName, args, workingDirectory, wslInfo, distroName, ct);
         }
 
         var toolName = OpNameToToolNameMapper[opName];
@@ -268,19 +269,21 @@ public static class ToolchainServiceExtensions
     /// <summary>
     /// Executes a command inside WSL using wsl.exe.
     /// </summary>
-    public static async Task<string[]> GetCommandOutputWsl(string opName, string args, PathEx workingDirectory, WslInfo wslInfo, CancellationToken ct)
+    public static async Task<string[]> GetCommandOutputWsl(string opName, string args, PathEx workingDirectory, WslInfo wslInfo, string distroName, CancellationToken ct)
     {
-        EnsureArg.IsNotNull(wslInfo, nameof(wslInfo));
-
         var toolName = OpNameToToolNameMapper[opName];
-        var linuxWorkingDir = wslInfo.ToLinuxPath(workingDirectory);
+        var linuxWorkingDir = GetLinuxWorkingDirectory(workingDirectory, wslInfo);
+        if (linuxWorkingDir == null)
+        {
+            return new[] { $"Unable to map '{workingDirectory}' to a Linux working directory for WSL execution." };
+        }
 
         // IMPORTANT:
         // Direct `wsl.exe --exec cargo ...` can fail on some setups because the non-interactive PATH
         // does not include ~/.cargo/bin (rustup installs cargo there).
         // Run through /bin/bash -lc when needed (handled by RunInWsl).
         var splitArgs = SplitCommandLineArgs(args);
-        using var proc = RunInWsl(wslInfo, toolName, splitArgs.ToArray(), linuxWorkingDir, env: null, ct);
+        using var proc = RunInWsl(distroName, toolName, splitArgs.ToArray(), linuxWorkingDir, env: null, ct);
 
         var ec = await proc;
         var output = proc.StandardOutputLines.Concat(proc.StandardErrorLines).ToArray();
@@ -299,10 +302,20 @@ public static class ToolchainServiceExtensions
     {
         EnsureArg.IsNotNull(wslInfo, nameof(wslInfo));
 
+        return RunInWsl(wslInfo.DistroName, command, args, linuxWorkingDir, env, ct);
+    }
+
+    /// <summary>
+    /// Runs a process in WSL by distro name. Supports "Mode 2" where workspace is Windows-local.
+    /// </summary>
+    public static ProcessRunner RunInWsl(string distroName, string command, string[] args, string linuxWorkingDir, IDictionary<string, string> env, CancellationToken ct)
+    {
+        EnsureArg.IsNotNullOrWhiteSpace(distroName, nameof(distroName));
+
         var wslExePath = WslInfo.GetWslExePath();
 
         // Build wsl.exe arguments: -d <distro> --cd <dir> --exec <command> <args>
-        var wslArgs = new List<string> { "-d", wslInfo.DistroName };
+        var wslArgs = new List<string> { "-d", distroName };
 
         if (!string.IsNullOrEmpty(linuxWorkingDir))
         {
@@ -344,6 +357,11 @@ public static class ToolchainServiceExtensions
     public static ProcessRunner RunCargoInWsl(WslInfo wslInfo, string[] cargoArgs, string linuxWorkingDir, CancellationToken ct)
     {
         return RunInWsl(wslInfo, Constants.WslCargoExe, cargoArgs, linuxWorkingDir, null, ct);
+    }
+
+    public static ProcessRunner RunCargoInWsl(string distroName, string[] cargoArgs, string linuxWorkingDir, CancellationToken ct)
+    {
+        return RunInWsl(distroName, Constants.WslCargoExe, cargoArgs, linuxWorkingDir, null, ct);
     }
 
     /// <summary>
@@ -492,6 +510,17 @@ public static class ToolchainServiceExtensions
         }
 
         return "'" + arg.Replace("'", "'\"'\"'") + "'";
+    }
+
+    private static string GetLinuxWorkingDirectory(PathEx workingDirectory, WslInfo wslInfo)
+    {
+        if (wslInfo != null)
+        {
+            return wslInfo.ToLinuxPath(workingDirectory);
+        }
+
+        // Mode 2: workspace is Windows-local
+        return WslPathMapper.TryWindowsToWslPath(workingDirectory, out var linuxWorkingDir) ? linuxWorkingDir : null;
     }
 }
 

@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Diagnostics;
 using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Threading;
@@ -13,9 +14,11 @@ using Microsoft.VisualStudio.ComponentModelHost;
 using Microsoft.VisualStudio.Imaging;
 using Microsoft.VisualStudio.Shell;
 using Microsoft.VisualStudio.Threading;
+using Microsoft.VisualStudio.Workspace;
 using Microsoft.VisualStudio.Workspace.VSIntegration.Contracts;
 using CommunityVS = Community.VisualStudio.Toolkit.VS;
 using Constants = KS.RustAnalyzer.TestAdapter.Constants;
+using KS.RustAnalyzer.Shell;
 
 namespace KS.RustAnalyzer;
 
@@ -73,6 +76,19 @@ public sealed class RustAnalyzerPackage : ToolkitPackage
 
         await JTF.SwitchToMainThreadAsync(cancellationToken);
 
+        // Emit a clear ActivityLog marker so it's obvious (from Help > View Activity Log)
+        // whether VS 2026 actually loaded this VSIX instance.
+        try
+        {
+            var asm = typeof(RustAnalyzerPackage).Assembly;
+            var fileVer = FileVersionInfo.GetVersionInfo(asm.Location)?.FileVersion ?? "unknown";
+            ActivityLog.LogInformation(Vsix.Name, $"Loaded {Vsix.Name} VSIX={Vsix.Version}, asm={asm.GetName().Version}, file={fileVer}");
+        }
+        catch
+        {
+            // Best-effort only.
+        }
+
         await ReleaseSummaryNotification.ShowAsync(_regSettings, _tl);
         await SearchAndDisableIncompatibleExtensionsAsync();
 
@@ -83,10 +99,40 @@ public sealed class RustAnalyzerPackage : ToolkitPackage
         {
             var cmServiceProvider = (IComponentModel)await GetServiceAsync(typeof(SComponentModel));
             var folderWorkspaceService = cmServiceProvider?.GetService<IVsFolderWorkspaceService>();
-            var workspaceRoot = folderWorkspaceService?.CurrentWorkspace?.Location;
+            var workspace = folderWorkspaceService?.CurrentWorkspace;
+            var workspaceRoot = workspace?.Location;
 
             if (!string.IsNullOrWhiteSpace(workspaceRoot))
             {
+                // Load persisted Target System selection (Mode 2) and apply it to the process env
+                // so TestAdapter can read it without having to launch VS with env vars.
+                try
+                {
+                    var ss = workspace.GetService<ISettingsService>();
+                    if (ss != null)
+                    {
+                        var mode = await ss.GetAsync(SettingsInfo.TypeTargetSystem, (PathEx)workspaceRoot);
+                        var distro = await ss.GetAsync(SettingsInfo.TypeWslDistroName, (PathEx)workspaceRoot);
+
+                        if (string.Equals(mode, "wsl", StringComparison.OrdinalIgnoreCase) && !string.IsNullOrWhiteSpace(distro))
+                        {
+                            Environment.SetEnvironmentVariable(Constants.RAVsTargetSystem, "wsl", EnvironmentVariableTarget.Process);
+                            Environment.SetEnvironmentVariable(Constants.RAVsWslDistroName, distro.Trim(), EnvironmentVariableTarget.Process);
+                            TemporaryTargetSystemStore.CurrentTargetSystem = $"WSL: {distro.Trim()}";
+                        }
+                        else
+                        {
+                            Environment.SetEnvironmentVariable(Constants.RAVsTargetSystem, "local", EnvironmentVariableTarget.Process);
+                            Environment.SetEnvironmentVariable(Constants.RAVsWslDistroName, null, EnvironmentVariableTarget.Process);
+                            TemporaryTargetSystemStore.CurrentTargetSystem = "Local Machine";
+                        }
+                    }
+                }
+                catch
+                {
+                    // Best-effort only.
+                }
+
                 await _preReqs.SatisfyForWorkspaceAsync((PathEx)workspaceRoot, cancellationToken);
             }
             else

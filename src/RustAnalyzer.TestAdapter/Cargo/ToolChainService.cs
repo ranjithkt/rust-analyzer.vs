@@ -124,10 +124,13 @@ public sealed class ToolchainService : IToolchainService
         {
             string metadataJson;
 
-            // Check if this is a WSL workspace
-            if (WslInfo.TryParse(manifestPath, out var wslInfo))
+            // Mode 1: WSL UNC workspace
+            // Mode 2: Windows-local workspace + WSL execution (if selected)
+            if (TargetSystemSelection.TryGetWslExecutionContext(manifestPath, out var wslInfo, out var distroName))
             {
-                metadataJson = await GetWorkspaceMetadataWslAsync(manifestPath, wslInfo, ct);
+                metadataJson = wslInfo != null
+                    ? await GetWorkspaceMetadataWslAsync(manifestPath, wslInfo, ct)
+                    : await GetWorkspaceMetadataWslForWindowsWorkspaceAsync(manifestPath, distroName, ct);
             }
             else
             {
@@ -183,14 +186,45 @@ public sealed class ToolchainService : IToolchainService
 
         var metadataJson = string.Join(string.Empty, proc.StandardOutputLines);
 
-        // Rewrite Linux paths in the JSON to Windows UNC paths
-        return RewriteCargoMetadataPathsForWsl(metadataJson, wslInfo);
+        // Rewrite Linux paths in the JSON to Windows paths
+        return RewriteCargoMetadataPathsFromLinuxToWindows(metadataJson, wslInfo);
     }
 
     /// <summary>
-    /// Rewrites path fields in cargo metadata JSON from Linux paths to Windows UNC paths.
+    /// Mode 2: Windows-local workspace + WSL execution.
     /// </summary>
-    private string RewriteCargoMetadataPathsForWsl(string json, WslInfo wslInfo)
+    private async Task<string> GetWorkspaceMetadataWslForWindowsWorkspaceAsync(PathEx manifestPath, string distroName, CancellationToken ct)
+    {
+        if (!WslPathMapper.TryWindowsToWslPath(manifestPath, out var linuxManifestPath) ||
+            !WslPathMapper.TryWindowsToWslPath(manifestPath.GetDirectoryName(), out var linuxWorkingDir))
+        {
+            throw new InvalidOperationException($"Unable to map manifest path '{manifestPath}' to a WSL /mnt path.").AddExitCode(-1);
+        }
+
+        var cargoArgs = new[] { "metadata", "--no-deps", "--format-version", "1", "--manifest-path", linuxManifestPath, "--offline" };
+
+        using var proc = ToolchainServiceExtensions.RunCargoInWsl(distroName, cargoArgs, linuxWorkingDir, ct);
+        _tl.L.WriteLine("Started WSL PID:{0} with args: {1}...", proc.ProcessId, proc.Arguments);
+        var exitCode = await proc;
+        _tl.L.WriteLine("... Finished WSL PID {0} with exit code {1}.", proc.ProcessId, proc.ExitCode);
+
+        if (exitCode != 0)
+        {
+            throw new InvalidOperationException($"cargo metadata (WSL) returned {exitCode}\n{string.Join("\n", proc.StandardErrorLines)}").AddExitCode(exitCode);
+        }
+
+        var metadataJson = string.Join(string.Empty, proc.StandardOutputLines);
+
+        // Rewrite /mnt/<drive>/... paths in the JSON to Windows paths
+        return RewriteCargoMetadataPathsFromLinuxToWindows(metadataJson, wslInfo: null);
+    }
+
+    /// <summary>
+    /// Rewrites path fields in cargo metadata JSON from Linux paths to Windows paths.
+    /// Mode 1: Linux paths -> Windows UNC (\\wsl.localhost\...)
+    /// Mode 2: /mnt/&lt;drive&gt;/... -> X:\...
+    /// </summary>
+    private string RewriteCargoMetadataPathsFromLinuxToWindows(string json, WslInfo wslInfo)
     {
         try
         {
@@ -225,7 +259,7 @@ public sealed class ToolchainService : IToolchainService
         }
         catch (Exception e)
         {
-            _tl.L.WriteLine("Failed to rewrite cargo metadata paths for WSL: {0}", e.Message);
+            _tl.L.WriteLine("Failed to rewrite cargo metadata paths from Linux to Windows: {0}", e.Message);
 
             // Return original JSON if rewriting fails
             return json;
@@ -238,7 +272,14 @@ public sealed class ToolchainService : IToolchainService
         {
             if (WslInfo.IsLinuxAbsolutePath(linuxPath))
             {
-                token[propertyName] = wslInfo.ToUncPath(linuxPath);
+                if (wslInfo != null)
+                {
+                    token[propertyName] = wslInfo.ToUncPath(linuxPath);
+                }
+                else if (WslPathMapper.TryWslToWindowsPath(linuxPath, out var winPath))
+                {
+                    token[propertyName] = winPath;
+                }
             }
         }
     }
@@ -251,7 +292,7 @@ public sealed class ToolchainService : IToolchainService
         try
         {
             var workingDir = tc.Manifest.GetDirectoryName();
-            var isWsl = WslInfo.TryParse(workingDir, out var wslInfo);
+            var isWsl = TargetSystemSelection.TryGetWslExecutionContext(workingDir, out var wslInfo, out var distroName);
 
             var cargoVersion = await ToolchainServiceExtensions.GetCommandOutputSingleLine("cargo", "--version", workingDir, ct);
             _tl.L.WriteLine($"Using: {cargoVersion}");
@@ -263,14 +304,25 @@ public sealed class ToolchainService : IToolchainService
             ProcessRunner proc;
             if (isWsl)
             {
-                var linuxManifestPath = wslInfo.ToLinuxPath(tc.Manifest);
-                var linuxWorkingDir = wslInfo.ToLinuxPath(workingDir);
+                var linuxManifestPath = wslInfo != null
+                    ? wslInfo.ToLinuxPath(tc.Manifest)
+                    : (WslPathMapper.TryWindowsToWslPath(tc.Manifest, out var lm) ? lm : null);
+                var linuxWorkingDir = wslInfo != null
+                    ? wslInfo.ToLinuxPath(workingDir)
+                    : (WslPathMapper.TryWindowsToWslPath(workingDir, out var ld) ? ld : null);
+
+                if (linuxManifestPath == null || linuxWorkingDir == null)
+                {
+                    throw new InvalidOperationException($"Unable to map manifest/working directory to WSL paths. Manifest='{tc.Manifest}', WorkingDir='{workingDir}'.");
+                }
 
                 var args = new[] { "test", "--no-run", "--manifest-path", linuxManifestPath, "--profile", profile }
                     .Concat(tc.AdditionalTestDiscoveryArguments.FromNullSeparatedArray())
                     .ToArray();
 
-                proc = ToolchainServiceExtensions.RunCargoInWsl(wslInfo, args, linuxWorkingDir, ct);
+                proc = wslInfo != null
+                    ? ToolchainServiceExtensions.RunCargoInWsl(wslInfo, args, linuxWorkingDir, ct)
+                    : ToolchainServiceExtensions.RunCargoInWsl(distroName, args, linuxWorkingDir, ct);
             }
             else
             {
@@ -297,7 +349,10 @@ public sealed class ToolchainService : IToolchainService
                 var regex = isWsl ? TestExecutablePathCrackerWsl : TestExecutablePathCracker;
                 var testExeBuildInfos = proc.StandardErrorLines
                     .Select(l => regex.Matches(l))
-                    .Where(m => m.Count > 0 && m[0].Groups.Count >= 4)
+                    // Both regexes are expected to produce 5 groups total:
+                    // [0]=full match, [1]=optional " unittests", [2]=src, [3]=full exe path, [4]=exe name.
+                    // Guard against unexpected output/regex changes.
+                    .Where(m => m.Count > 0 && m[0].Groups.Count >= 5)
                     .Select(m => ParseTestExeMatch(m[0], isWsl, wslInfo))
                     .ToArray();
 
@@ -313,17 +368,21 @@ public sealed class ToolchainService : IToolchainService
                 if (isWsl)
                 {
                     // For WSL, cargo may emit either absolute Linux paths or paths relative to the --cd directory.
-                    // Convert both forms to UNC paths safely.
-                    var linuxWorkingDir = wslInfo.ToLinuxPath(workingDir);
+                    // Convert both forms safely.
+                    var linuxWorkingDir = wslInfo != null
+                        ? wslInfo.ToLinuxPath(workingDir)
+                        : (WslPathMapper.TryWindowsToWslPath(workingDir, out var ld) ? ld : null);
                     try
                     {
-                        exes = testExeBuildInfos.Select(x => ConvertWslTestExePathToUnc(x.Exe, linuxWorkingDir, wslInfo)).ToArray();
+                        exes = wslInfo != null
+                            ? testExeBuildInfos.Select(x => ConvertWslTestExePathToUnc(x.Exe, linuxWorkingDir, wslInfo)).ToArray()
+                            : testExeBuildInfos.Select(x => ConvertWslTestExePathToWindows(x.Exe, linuxWorkingDir)).ToArray();
                     }
                     catch (Exception ex)
                     {
                         var raw = string.Join(" | ", testExeBuildInfos.Select(i => i.Exe ?? "<null>"));
                         var e = new InvalidOperationException(
-                            $"Unable to convert cargo-reported WSL test exe paths to UNC paths. Raw paths: {raw}. Command line '{proc.Arguments}'. Exit code: {proc.ExitCode}",
+                            $"Unable to convert cargo-reported WSL test exe paths to Windows paths. Raw paths: {raw}. Command line '{proc.Arguments}'. Exit code: {proc.ExitCode}",
                             ex);
                         _tl.L.WriteError(e.Message);
                         _tl.T.TrackException(e);
@@ -397,22 +456,65 @@ public sealed class ToolchainService : IToolchainService
         return wslInfo.ToUncPathEx(combined);
     }
 
+    private static PathEx ConvertWslTestExePathToWindows(string exePathFromCargo, string linuxWorkingDir)
+    {
+        if (string.IsNullOrWhiteSpace(exePathFromCargo))
+        {
+            throw new ArgumentException("WSL test exe path was empty.", nameof(exePathFromCargo));
+        }
+
+        var normalized = exePathFromCargo.Trim().Replace('\\', '/');
+        string absoluteLinux;
+
+        if (WslInfo.IsLinuxAbsolutePath(normalized))
+        {
+            absoluteLinux = normalized;
+        }
+        else
+        {
+            if (!WslInfo.IsLinuxAbsolutePath(linuxWorkingDir))
+            {
+                throw new ArgumentException($"Linux working directory '{linuxWorkingDir}' must be an absolute Linux path.", nameof(linuxWorkingDir));
+            }
+
+            absoluteLinux = linuxWorkingDir.TrimEnd('/') + "/" + normalized.TrimStart('/');
+        }
+
+        if (!WslPathMapper.TryWslToWindowsPath(absoluteLinux, out var winPath))
+        {
+            throw new InvalidOperationException($"Unable to map Linux path '{absoluteLinux}' to a Windows path.");
+        }
+
+        return (PathEx)winPath;
+    }
+
     private BuildMessage[] OutputPreprocessorForCargoToolsWithoutJsonOutput(string msg) => new[] { new StringBuildMessage { Message = msg } };
 
     private async Task<TestSuiteInfo> GetTestSuiteInfoFromOneTestExeAsync(TestContainer container, PathEx testExePath, CancellationToken ct)
     {
         var workspaceRoot = container.TargetDir.GetDirectoryName();
-        var isWsl = WslInfo.TryParse(workspaceRoot, out var wslInfo);
+        var isWsl = TargetSystemSelection.TryGetWslExecutionContext(workspaceRoot, out var wslInfo, out var distroName);
 
         ProcessRunner proc;
         if (isWsl)
         {
-            // For WSL, testExePath is already a full UNC path, convert it to Linux path and run via WSL
-            var linuxExePath = wslInfo.ToLinuxPath(testExePath);
-            var linuxWorkingDir = wslInfo.ToLinuxPath(workspaceRoot);
+            // For WSL, the test exe is a Linux ELF binary. Run it inside WSL.
+            var linuxExePath = wslInfo != null
+                ? wslInfo.ToLinuxPath(testExePath)
+                : (WslPathMapper.TryWindowsToWslPath(testExePath, out var lex) ? lex : null);
+            var linuxWorkingDir = wslInfo != null
+                ? wslInfo.ToLinuxPath(workspaceRoot)
+                : (WslPathMapper.TryWindowsToWslPath(workspaceRoot, out var lwd) ? lwd : null);
             var testArgs = new[] { "--list", "--format", "json", "-Zunstable-options" };
 
-            proc = ToolchainServiceExtensions.RunInWsl(wslInfo, linuxExePath, testArgs, linuxWorkingDir, ImmutableDictionary<string, string>.Empty, ct);
+            if (linuxExePath == null || linuxWorkingDir == null)
+            {
+                throw new InvalidOperationException($"Unable to map test exe/working directory to WSL paths. Exe='{testExePath}', WorkingDir='{workspaceRoot}'.");
+            }
+
+            proc = wslInfo != null
+                ? ToolchainServiceExtensions.RunInWsl(wslInfo, linuxExePath, testArgs, linuxWorkingDir, ImmutableDictionary<string, string>.Empty, ct)
+                : ToolchainServiceExtensions.RunInWsl(distroName, linuxExePath, testArgs, linuxWorkingDir, ImmutableDictionary<string, string>.Empty, ct);
         }
         else
         {
@@ -435,7 +537,7 @@ public sealed class ToolchainService : IToolchainService
                 tests = proc.StandardOutputLines
                     .Skip(1)
                     .Take(proc.StandardOutputLines.Count() - 2)
-                    .Select(l => DeserializeTest(workspaceRoot, l, wslInfo))
+                    .Select(l => DeserializeTest(workspaceRoot, l, isWsl, wslInfo))
                     .OrderBy(x => x.FQN).ThenBy(x => x.StartLine);
             }
 
@@ -448,7 +550,7 @@ public sealed class ToolchainService : IToolchainService
         }
     }
 
-    private static TestSuiteInfo.TestInfo DeserializeTest(PathEx workspaceRoot, string serializedVal, WslInfo wslInfo)
+    private static TestSuiteInfo.TestInfo DeserializeTest(PathEx workspaceRoot, string serializedVal, bool isWsl, WslInfo wslInfo)
     {
         // NOTE: We need to extract the source_path from the raw JSON BEFORE deserialization,
         // because PathEx constructor converts "/" to "\" which breaks IsLinuxAbsolutePath check.
@@ -465,23 +567,37 @@ public sealed class ToolchainService : IToolchainService
 
         var test = JsonConvert.DeserializeObject<TestSuiteInfo.TestInfo>(serializedVal);
 
-        if (wslInfo != null && rawSourcePath != null && WslInfo.IsLinuxAbsolutePath(rawSourcePath))
+        if (isWsl && rawSourcePath != null && WslInfo.IsLinuxAbsolutePath(rawSourcePath))
         {
             // For WSL, the source path from the test binary is a Linux absolute path
-            // Convert it to a Windows UNC path
-            test.SourcePath = wslInfo.ToUncPathEx(rawSourcePath);
+            // Convert it to a Windows path (UNC for Mode 1, drive path for Mode 2).
+            if (wslInfo != null)
+            {
+                test.SourcePath = wslInfo.ToUncPathEx(rawSourcePath);
+            }
+            else if (WslPathMapper.TryWslToWindowsPath(rawSourcePath, out var winPath))
+            {
+                test.SourcePath = (PathEx)winPath;
+            }
         }
-        else if (wslInfo != null)
+        else if (isWsl)
         {
-            // WSL workspace but rawSourcePath extraction failed or path is relative.
-            // PathEx may have converted a Linux absolute path like "/home/..." to "\home\...".
+            // WSL execution but rawSourcePath extraction failed or path is relative.
+            // PathEx may have converted a Linux absolute path like "/mnt/c/..." to "\mnt\c\...".
             // Check if it looks like a converted Linux absolute path (starts with \ but not \\).
             var pathStr = (string)test.SourcePath;
-            if (pathStr.StartsWith(@"\") && !pathStr.StartsWith(@"\\"))
+            if (!string.IsNullOrEmpty(pathStr) && pathStr.StartsWith(@"\") && !pathStr.StartsWith(@"\\"))
             {
-                // Convert back to Linux format and then to UNC
+                // Convert back to Linux format and then to Windows
                 var linuxPath = "/" + pathStr.Substring(1).Replace('\\', '/');
-                test.SourcePath = wslInfo.ToUncPathEx(linuxPath);
+                if (wslInfo != null)
+                {
+                    test.SourcePath = wslInfo.ToUncPathEx(linuxPath);
+                }
+                else if (WslPathMapper.TryWslToWindowsPath(linuxPath, out var winPath))
+                {
+                    test.SourcePath = (PathEx)winPath;
+                }
             }
             else
             {
@@ -521,7 +637,7 @@ public sealed class ToolchainService : IToolchainService
         outputPane.Clear();
 
         var workingDir = filePath.GetDirectoryName();
-        var isWsl = WslInfo.TryParse(workingDir, out var wslInfo);
+        var isWsl = TargetSystemSelection.TryGetWslExecutionContext(workingDir, out var wslInfo, out var distroName);
 
         ts.TrackEvent(
             opName,
@@ -531,6 +647,7 @@ public sealed class ToolchainService : IToolchainService
         {
             return await RunWslAsync(
                 wslInfo,
+                distroName,
                 opName,
                 arguments,
                 workingDir,
@@ -576,12 +693,21 @@ public sealed class ToolchainService : IToolchainService
             ct);
     }
 
-    private static async Task<bool> RunWslAsync(WslInfo wslInfo, string opName, string arguments, PathEx workingDir, ProcessOutputRedirector redirector, CancellationToken ct)
+    private static async Task<bool> RunWslAsync(WslInfo wslInfo, string distroName, string opName, string arguments, PathEx workingDir, ProcessOutputRedirector redirector, CancellationToken ct)
     {
         EnsureArg.IsNotEmptyOrWhiteSpace(arguments, nameof(arguments));
-        EnsureArg.IsNotNull(wslInfo, nameof(wslInfo));
 
-        var linuxWorkingDir = wslInfo.ToLinuxPath(workingDir);
+        EnsureArg.IsNotNullOrWhiteSpace(distroName, nameof(distroName));
+
+        string linuxWorkingDir;
+        if (wslInfo != null)
+        {
+            linuxWorkingDir = wslInfo.ToLinuxPath(workingDir);
+        }
+        else if (!WslPathMapper.TryWindowsToWslPath(workingDir, out linuxWorkingDir))
+        {
+            throw new InvalidOperationException($"Unable to map working directory '{workingDir}' to a WSL /mnt path.").AddExitCode(-1);
+        }
 
         var cargoVersion = await ToolchainServiceExtensions.GetCommandOutputSingleLine("cargo", "--version", workingDir, ct);
         var toolVersion = await ToolchainServiceExtensions.GetCommandOutputSingleLine(opName, "--version", workingDir, ct);
@@ -590,7 +716,7 @@ public sealed class ToolchainService : IToolchainService
         redirector?.WriteLineWithoutProcessing($"==== Build step (WSL): Started ====");
         redirector?.WriteLineWithoutProcessing($"        Using : {cargoVersion}");
         redirector?.WriteLineWithoutProcessing($"        Using : {toolVersion}");
-        redirector?.WriteLineWithoutProcessing($"       Distro : {wslInfo.DistroName}");
+        redirector?.WriteLineWithoutProcessing($"       Distro : {distroName}");
         redirector?.WriteLineWithoutProcessing($"    Arguments : {arguments}");
         redirector?.WriteLineWithoutProcessing($"   WorkingDir : {linuxWorkingDir} (WSL)");
         redirector?.WriteLineWithoutProcessing($"");
@@ -598,11 +724,13 @@ public sealed class ToolchainService : IToolchainService
         // Convert arguments to array, handling quoted strings properly
         var argList = ParseArgumentsForWsl(arguments, wslInfo);
 
-        using var process = ToolchainServiceExtensions.RunCargoInWsl(wslInfo, argList, linuxWorkingDir, ct);
+        using var process = wslInfo != null
+            ? ToolchainServiceExtensions.RunCargoInWsl(wslInfo, argList, linuxWorkingDir, ct)
+            : ToolchainServiceExtensions.RunCargoInWsl(distroName, argList, linuxWorkingDir, ct);
         var whnd = process.WaitHandle;
         if (whnd == null)
         {
-            redirector?.WriteErrorLineWithoutProcessing($"Error - Failed to start cargo in WSL distro '{wslInfo.DistroName}'");
+            redirector?.WriteErrorLineWithoutProcessing($"Error - Failed to start cargo in WSL distro '{distroName}'");
             return false;
         }
 
@@ -676,26 +804,38 @@ public sealed class ToolchainService : IToolchainService
     }
 
     /// <summary>
-    /// If an argument is a Windows UNC path under the WSL distro, convert it to a Linux path.
+    /// If an argument is a Windows path that WSL will see, convert it to a Linux path.
+    /// - Mode 1: \\wsl.localhost\... -> /home/...
+    /// - Mode 2: C:\... -> /mnt/c/...
     /// </summary>
     private static string ConvertPathArgumentForWsl(string arg, WslInfo wslInfo)
     {
-        // Check if this looks like a path under our WSL distro
-        if (arg.StartsWith(wslInfo.UncDistroRoot, StringComparison.OrdinalIgnoreCase))
+        if (string.IsNullOrEmpty(arg))
         {
-            return wslInfo.ToLinuxPath(arg);
+            return arg;
         }
 
-        // Handle common patterns like --foo=\\wsl.localhost\Distro\path or -C=\\wsl$...
-        var idx = arg.IndexOf(wslInfo.UncDistroRoot, StringComparison.OrdinalIgnoreCase);
-        if (idx >= 0)
+        // Mode 1: UNC workspace.
+        if (wslInfo != null)
         {
-            var prefix = arg.Substring(0, idx);
-            var uncPath = arg.Substring(idx);
-            return prefix + wslInfo.ToLinuxPath(uncPath);
+            // Check if this looks like a path under our WSL distro
+            if (arg.StartsWith(wslInfo.UncDistroRoot, StringComparison.OrdinalIgnoreCase))
+            {
+                return wslInfo.ToLinuxPath(arg);
+            }
+
+            // Handle common patterns like --foo=\\wsl.localhost\Distro\path or -C=\\wsl$...
+            var idx = arg.IndexOf(wslInfo.UncDistroRoot, StringComparison.OrdinalIgnoreCase);
+            if (idx >= 0)
+            {
+                var prefix = arg.Substring(0, idx);
+                var uncPath = arg.Substring(idx);
+                return prefix + wslInfo.ToLinuxPath(uncPath);
+            }
         }
 
-        return arg;
+        // Mode 2: Windows workspace - rewrite any Windows-local paths to /mnt form.
+        return WslPathMapper.ConvertArgumentWindowsPathsToWsl(arg);
     }
 }
 

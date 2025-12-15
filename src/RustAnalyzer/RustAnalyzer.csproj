@@ -24,7 +24,8 @@
     <CopyOutputSymbolsToOutputDirectory>true</CopyOutputSymbolsToOutputDirectory>
     <StartAction>Program</StartAction>
     <StartProgram Condition="'$(DevEnvDir)' != ''">$(DevEnvDir)devenv.exe</StartProgram>
-    <StartArguments>/rootsuffix Exp</StartArguments>
+    <!-- Note: /log ensures ActivityLog.xml is generated/updated every run -->
+    <StartArguments>/rootsuffix Exp /log</StartArguments>
   </PropertyGroup>
   <PropertyGroup Condition=" '$(Configuration)|$(Platform)' == 'Debug|AnyCPU' ">
     <DebugSymbols>true</DebugSymbols>
@@ -172,18 +173,28 @@
     </Reference>
     <Reference Include="Microsoft.VisualStudio.Workspace">
       <HintPath>..\external\vs.17.11\Microsoft.VisualStudio.Workspace.dll</HintPath>
+      <!-- Do not ship VS-inbox workspace assemblies inside the VSIX -->
+      <Private>false</Private>
     </Reference>
     <Reference Include="Microsoft.VisualStudio.Workspace.Extensions">
       <HintPath>..\external\vs.17.11\Microsoft.VisualStudio.Workspace.Extensions.dll</HintPath>
+      <!-- Do not ship VS-inbox workspace assemblies inside the VSIX -->
+      <Private>false</Private>
     </Reference>
     <Reference Include="Microsoft.VisualStudio.Workspace.Extensions.VS">
       <HintPath>..\external\vs.17.11\Microsoft.VisualStudio.Workspace.Extensions.VS.dll</HintPath>
+      <!-- Do not ship VS-inbox workspace assemblies inside the VSIX -->
+      <Private>false</Private>
     </Reference>
     <Reference Include="Microsoft.VisualStudio.Workspace.VSIntegration">
       <HintPath>..\external\vs.17.11\Microsoft.VisualStudio.Workspace.VSIntegration.dll</HintPath>
+      <!-- Do not ship VS-inbox workspace assemblies inside the VSIX -->
+      <Private>false</Private>
     </Reference>
     <Reference Include="Microsoft.VisualStudio.Workspace.VSIntegration.Contracts">
       <HintPath>..\external\vs.17.11\Microsoft.VisualStudio.Workspace.VSIntegration.Contracts.dll</HintPath>
+      <!-- Do not ship VS-inbox workspace assemblies inside the VSIX -->
+      <Private>false</Private>
     </Reference>
     <PackageReference Include="Community.VisualStudio.VSCT" Version="16.0.29.6">
       <PrivateAssets>all</PrivateAssets>

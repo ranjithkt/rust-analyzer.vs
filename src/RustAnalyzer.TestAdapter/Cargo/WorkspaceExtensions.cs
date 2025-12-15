@@ -72,7 +72,7 @@ public static class WorkspaceExtensions
     /// </summary>
     public static PathEx CreateTargetFileNameForWorkspace(this Workspace.Target @this)
     {
-        var isWsl = WslInfo.IsWslPath(@this.Parent.Parent.WorkspaceRoot);
+        var isWsl = TargetSystemSelection.TryGetWslExecutionContext(@this.Parent.Parent.WorkspaceRoot, out _, out _);
         return CreateTargetFileName(@this, isWsl);
     }
 

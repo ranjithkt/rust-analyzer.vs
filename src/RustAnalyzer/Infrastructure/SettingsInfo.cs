@@ -6,9 +6,15 @@ namespace KS.RustAnalyzer.Infrastructure;
 
 public class SettingsInfo
 {
+    public const string KindGeneral = "General";
     public const string KindDebugger = "Debugger";
     public const string KindBuild = "Build";
     public const string KindTest = "Test";
+
+    // Workspace-scoped settings (stored in VS Open Folder settings store).
+    // These are not shown in the Node Browse Object UI (toolbar combo is the UX).
+    public const string TypeTargetSystem = "TargetSystem";
+    public const string TypeWslDistroName = "WslDistroName";
     public const string TypeCommandLineArguments = nameof(NodeBrowseObject.CommandLineArguments);
     public const string TypeDebuggerEnvironment = nameof(NodeBrowseObject.DebuggerEnvironment);
     public const string TypeDebuggerWorkingDirectory = nameof(NodeBrowseObject.WorkingDirectory);
@@ -20,6 +26,20 @@ public class SettingsInfo
     public static readonly IReadOnlyDictionary<string, SettingsInfo> Store =
         new Dictionary<string, SettingsInfo>
         {
+            [TypeTargetSystem] =
+                new SettingsInfo
+                {
+                    Kind = KindGeneral,
+                    Getter = x => x,
+                    ShouldDisplay = (_, _, _) => false,
+                },
+            [TypeWslDistroName] =
+                new SettingsInfo
+                {
+                    Kind = KindGeneral,
+                    Getter = x => x,
+                    ShouldDisplay = (_, _, _) => false,
+                },
             [TypeCommandLineArguments] =
                 new SettingsInfo
                 {

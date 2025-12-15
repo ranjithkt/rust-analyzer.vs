@@ -67,10 +67,11 @@ public sealed class DebugLaunchTargetProvider : ILaunchDebugTargetProvider
 
             var processName = target.GetPath(profile);
 
-            // Check if this is a WSL workspace
-            var isWsl = WslInfo.TryParse(package.Parent.WorkspaceRoot, out var wslInfo);
+            // Mode 1: WSL UNC workspace
+            // Mode 2: Windows-local workspace + WSL execution (if selected)
+            var isWsl = TargetSystemSelection.TryGetWslExecutionContext(package.Parent.WorkspaceRoot, out var wslInfo, out var distroName);
 
-            if (!isWsl && !File.Exists(processName))
+            if (!File.Exists(processName))
             {
                 var message = string.Format("Unable to find file: '{0}'.", processName);
                 L.WriteLine(message);
@@ -90,7 +91,7 @@ public sealed class DebugLaunchTargetProvider : ILaunchDebugTargetProvider
             VsDebugTargetInfo info;
             if (isWsl)
             {
-                info = await CreateWslDebugTargetInfoAsync(package, target, profile, processName, args, workingDirectory, noDebugFlag, wslInfo, ct);
+                info = await CreateWslDebugTargetInfoAsync(package, target, profile, processName, args, workingDirectory, noDebugFlag, wslInfo, distroName, ct);
             }
             else
             {
@@ -162,15 +163,16 @@ public sealed class DebugLaunchTargetProvider : ILaunchDebugTargetProvider
         string workingDirectory,
         __VSDBGLAUNCHFLAGS noDebugFlag,
         WslInfo wslInfo,
+        string distroName,
         CancellationToken ct)
     {
-        // Convert Windows UNC paths to Linux paths for WSL debugging
-        var linuxExePath = wslInfo.ToLinuxPath(processName);
+        // Convert Windows paths to Linux paths for WSL debugging
+        var linuxExePath = ResolveLinuxPathForDebugExe(processName, wslInfo);
         var linuxWorkingDir = ResolveLinuxWorkingDirectory(workingDirectory, package.Parent.WorkspaceRoot, processName, wslInfo);
 
         // For WSL debugging, we use the SSH:wsl+<distro> port name
         // This tells VS to use the WSL debugging transport
-        var portName = $"SSH:wsl+{wslInfo.DistroName}";
+        var portName = $"SSH:wsl+{distroName}";
 
         L.WriteLine("Creating WSL debug target: exe={0}, workDir={1}, portName={2}", linuxExePath, linuxWorkingDir, portName);
 
@@ -194,10 +196,26 @@ public sealed class DebugLaunchTargetProvider : ILaunchDebugTargetProvider
         };
     }
 
+    private static string ResolveLinuxPathForDebugExe(PathEx exePath, WslInfo wslInfo)
+    {
+        if (wslInfo != null)
+        {
+            return wslInfo.ToLinuxPath(exePath);
+        }
+
+        if (WslPathMapper.TryWindowsToWslPath(exePath, out var linuxExePath))
+        {
+            return linuxExePath;
+        }
+
+        // Best-effort fallback: try treating it as a Linux absolute path.
+        return exePath.ToString().Replace('\\', '/');
+    }
+
     private static string ResolveLinuxWorkingDirectory(string workingDirectorySetting, PathEx workspaceRoot, PathEx exePath, WslInfo wslInfo)
     {
         // Default: directory of the exe
-        var fallback = wslInfo.ToLinuxPath(exePath.GetDirectoryName());
+        var fallback = ResolveLinuxPathForDebugExe(exePath.GetDirectoryName(), wslInfo);
 
         if (workingDirectorySetting.IsNullOrEmpty())
         {
@@ -213,22 +231,26 @@ public sealed class DebugLaunchTargetProvider : ILaunchDebugTargetProvider
         // If user provided a WSL UNC path, convert it.
         if (WslInfo.IsWslPath(workingDirectorySetting))
         {
-            return wslInfo.ToLinuxPath(workingDirectorySetting);
+            return wslInfo != null ? wslInfo.ToLinuxPath(workingDirectorySetting) : fallback;
         }
 
-        // If user provided a Windows-rooted path (e.g. C:\...), we cannot reliably map it to WSL.
-        // Fall back to the exe directory to avoid passing an invalid Linux cwd to the debugger.
+        // If user provided a Windows-rooted path (e.g. C:\...), map it for Mode 2.
         if (Path.IsPathRooted(workingDirectorySetting))
         {
-            return fallback;
+            return WslPathMapper.TryWindowsToWslPath(workingDirectorySetting, out var linuxPath) ? linuxPath : fallback;
         }
 
         // Otherwise treat it as a relative path under the workspace root.
         // This preserves the common “target/debug” style values.
         var combined = workspaceRoot + (PathEx)workingDirectorySetting;
-        if (WslInfo.IsWslPath(combined))
+        if (wslInfo != null && WslInfo.IsWslPath(combined))
         {
             return wslInfo.ToLinuxPath(combined);
+        }
+
+        if (WslPathMapper.TryWindowsToWslPath(combined, out var combinedLinux))
+        {
+            return combinedLinux;
         }
 
         return fallback;

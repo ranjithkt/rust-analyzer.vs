@@ -1,5 +1,14 @@
 ## Goal
-Add **WSL support** to this Visual Studio (VS) extension so that when a user opens a Rust workspace located under `\\wsl.localhost\…` (or `\\wsl$\…`) in **Visual Studio (not VS Code)**, the extension can:
+Add **WSL support** to this Visual Studio (VS) extension so that a user can work on Rust code in Visual Studio and still have **all Rust tool execution happen inside a selected WSL distribution**, while keeping existing **Windows-native behavior unchanged**.
+
+This plan covers two “workspace location” modes:
+
+- **Mode 1 (WSL UNC workspace)**: user opens a folder under `\\wsl.localhost\…` (or `\\wsl$\…`).
+- **Mode 2 (Windows workspace, WSL execution)** *(Option 1 requested)*: user opens a folder under `C:\…` (or other Windows local drive), but **build/clippy/fmt/test/debug** are executed in WSL.
+
+> Important: **Mode 2 is the recommended path for VS 2026 / 18.x** because VS Open Folder has shown instability when its workspace DB lives under `\\wsl.localhost\...` (see “VS 2026 note” below).
+
+In both modes, the extension can:
 
 - Run **build** (cargo build)
 - Run **cargo clippy**
@@ -16,9 +25,25 @@ This document is a **plan only**: it proposes a minimal-change implementation st
 ## Non-goals / constraints (explicit)
 - **Do not change Windows behavior**: Windows workspaces must keep their current `.exe` target naming, debug dropdown population, and native debugging launch behavior.
 - **No broad refactors**: prefer small, WSL-gated shims at chokepoints (tool invocation, metadata path rewriting, output path rewriting).
-- **WSL detection is workspace-scoped**: WSL behavior must activate only for WSL UNC workspaces (`\\wsl.localhost\...`, `\\wsl$\...`) unless a future optional “target system” UI overrides it.
+- **WSL detection is workspace-scoped by default**: WSL behavior activates for WSL UNC workspaces (`\\wsl.localhost\...`, `\\wsl$\...`).
+- **Target-system override**: we will also support an explicit override (per-workspace) that forces WSL execution even for a Windows-local workspace (Mode 2). This override must be opt-in and must not affect Windows-native workflows unless selected.
 
 ---
+
+## VS 2026 / 18.x note: Open Folder + WSL UNC instability (why Mode 2 exists)
+During investigation on VS 2026 (18.1.0), opening a folder under `\\wsl.localhost\...` sometimes produces an ActivityLog error like:
+
+- `VS/Workspace/BrowseOpenWorkspace`
+- `System.IO.IOException: The process cannot access the file '\\wsl.localhost\...\<workspace>\.vs\slnx.sqlite' because it is being used by another process`
+- followed by failures inside `DebugTargetsManager.DeserializeAsync`
+
+When this happens, Visual Studio’s **Open Folder debug-target DB is not initialized**, and **debug dropdown population / build context enablement becomes unreliable** regardless of extension correctness.
+
+This plan therefore treats:
+- **Mode 1 (WSL UNC workspace)** as “best effort” (and likely a VS bug to track upstream), and
+- **Mode 2 (Windows workspace + WSL execution)** as the primary supported workflow for VS 2026.
+
+Mode 2 also aligns with the user’s intent to avoid Windows tooling requirements while still using VS UI, and it allows the user to add Defender exclusions for the Windows folder if needed.
 
 ## Current behavior (Windows) – how the pieces fit
 
@@ -94,12 +119,21 @@ Examples:
 - The implementation should not hard-require WSL2, but the plan should document “WSL2 recommended” if we hit watcher/perf limits.
 
 ### Path mapping requirement
-For WSL execution and output processing we need a **reversible mapping**:
+For WSL execution and output processing we need a **reversible mapping**. There are two mapping categories:
 
+#### Category A (WSL UNC workspace, Mode 1)
 - **Windows UNC → Linux path**
   - `\\wsl.localhost\Ubuntu-22.04\home\u\p\Cargo.toml` → `/home/u/p/Cargo.toml`
 - **Linux absolute path → Windows UNC (same distro)**
   - `/home/u/p/src/main.rs` → `\\wsl.localhost\Ubuntu-22.04\home\u\p\src\main.rs`
+
+#### Category B (Windows workspace, Mode 2 / Option 1)
+- **Windows local path → Linux path (under /mnt)**
+  - `C:\Repos\trader-one\Cargo.toml` → `/mnt/c/Repos/trader-one/Cargo.toml`
+- **Linux path (under /mnt) → Windows local path**
+  - `/mnt/c/Repos/trader-one/src/main.rs` → `C:\Repos\trader-one\src\main.rs`
+
+> For Category B, prefer using `wslpath` (via `wsl.exe`) for correctness when paths are not simple `X:\...` forms.
 
 This mapping must be:
 - deterministic
@@ -175,6 +209,145 @@ Why this is minimal:
 Optional alignment with existing stubs:
 - There are existing (currently stubby) remote target interfaces under `src/RustAnalyzer.Remote/` (`IRemoteTarget`, `IRemoteTargets`).
 - **Optional**: model `WslInfo` as (or alongside) an `IRemoteTarget` implementation to keep the “target system” concept extensible (WSL today, SSH later). This should remain a thin type alias/wrapper, not a refactor.
+
+---
+
+## Mode 2 (Option 1): Windows workspace + WSL execution (recommended for VS 2026)
+
+### Summary
+User opens a workspace under a **Windows-local path** (e.g. `C:\Repos\trader-one`) to keep VS Open Folder stable. The extension then runs:
+
+- `cargo metadata / build / clippy / fmt / test` via `wsl.exe`
+- debugging via VS’s WSL debug transport (`SSH:wsl+<distro>`) against the **Linux ELF** binaries produced under the workspace’s `target/` folder (which lives on NTFS).
+
+This avoids the Open Folder `\\wsl.localhost\...\.vs\slnx.sqlite` instability, at the cost of compiling on `/mnt/c` (which can be mitigated with Defender exclusions; see “Performance notes”).
+
+### How this differs from “tapping into the C++ WSL toolset flow”
+Both approaches can “execute in WSL”. The difference is **where the build artifacts and filesystem writes happen**:
+
+- **This plan (Mode 2)**: build runs in WSL **against `/mnt/<drive>`** paths that are backed by NTFS. This is simplest and keeps our existing extension architecture (Open Folder + file scanner + debug provider).
+- **C++ Linux/WSL toolset**: often copies/syncs sources into WSL’s Linux filesystem and builds there, which tends to avoid NTFS/AV overhead. However it requires a project system that drives that sync/build pipeline.
+
+This plan intentionally implements the simplest WSL execution first. If `/mnt/c` performance is problematic, add “mirror-to-WSL build root” as a later stage (see “Performance notes”).
+
+### UX / configuration
+Add a per-workspace setting (“Target System”) with values like:
+- `Local Machine` (default; current behavior)
+- `WSL: <DistroName>` (forces WSL execution even when workspace root is Windows)
+
+Implementation detail:
+- There is already a `Target System` combo in the UI (`src/RustAnalyzer/Shell/TargetSystemCommands.cs`). For Mode 2, we must persist the selection per workspace and make it readable from both the `RustAnalyzer` and `RustAnalyzer.TestAdapter` assemblies.
+
+Recommended persistence:
+- **Workspace settings** (preferred): VS Open Folder settings service (`ISettingsService`) keyed by workspace root.
+- **Fallback**: a process environment variable for the current VS session (works for prototyping; less ideal for multi-workspace scenarios).
+
+### Core technical changes (gated behind “Target System = WSL”)
+
+#### A) WSL target selection / distro discovery
+Add a minimal, shared “target selection” helper accessible from both projects:
+- `TargetSystem` model: `Local` or `Wsl(distroName)`
+- `TargetSystemProvider.GetCurrent(workspaceRoot)`:
+  - returns WSL only if the user selected WSL for that workspace
+  - otherwise returns Local
+
+Also allow Mode 1 (WSL UNC workspace) to infer distro from the UNC root (existing `WslInfo.TryParse(...)`).
+
+#### B) Windows ↔ WSL path mapper (Category B)
+Add a new helper (suggested location: `src/RustAnalyzer.TestAdapter/Common/`) that can map:
+- `C:\...` ↔ `/mnt/c/...`
+- and (optionally) use `wslpath` for corner cases
+
+Proposed API:
+- `bool TryMapWindowsToWsl(string windowsPath, out string linuxPath)`
+- `bool TryMapWslToWindows(string linuxPath, out string windowsPath)`
+- `Task<string> WindowsToWslViaWslpathAsync(string windowsPath, string distro, CancellationToken ct)` (fallback)
+- `Task<string> WslToWindowsViaWslpathAsync(string linuxPath, string distro, CancellationToken ct)` (fallback)
+
+Rules:
+- Never push raw Linux paths through `PathEx` (it rewrites `/` to `\`).
+- Do mapping at the string layer, then only convert to `PathEx` once the path is in Windows form.
+
+#### C) Route tool execution to WSL even when workspace root is Windows
+Update the chokepoints that currently decide “Windows vs WSL” based solely on UNC prefix:
+- `ToolChainService.GetWorkspaceAsync` (cargo metadata)
+- `ToolChainService.BuildAsync / CleanAsync / RunFmtAsync / RunClippyAsync`
+- `ToolChainServiceExtensions.GetCommandOutput*` and any toolchain detection
+- `PreReqsCheckService` (workspace-aware prereqs)
+
+New decision logic:
+- If `workspaceRoot` is WSL UNC → WSL mode (Mode 1)
+- Else if `Target System == WSL:<distro>` → WSL mode (Mode 2)
+- Else → Windows mode (current behavior)
+
+Execution in Mode 2:
+- Linux working dir = mapped Windows folder, e.g. `/mnt/c/Repos/trader-one`
+- Use `wsl.exe -d <distro> --cd <linuxWorkingDir> --exec ...`
+- When invoking `cargo`, prefer `/bin/bash -lc` wrapper if PATH is minimal (same fix as Mode 1).
+
+#### D) Cargo metadata rewriting for Mode 2
+When running `cargo metadata` in WSL on a Windows workspace, paths in JSON will typically be:
+- `/mnt/c/...`
+
+Before deserializing into the `Workspace` model (which uses `PathEx`), rewrite:
+- `workspace_root`, `target_directory`, `packages[].manifest_path`, `packages[].targets[].src_path`
+
+from Linux `/mnt/...` to Windows `C:\...`.
+
+#### E) Diagnostics path rewriting for Mode 2
+Update `StringBuildMessagePreprocessor` and JSON output parsing so that:
+- absolute Linux paths under `/mnt/<drive>/...` are mapped to `X:\...`
+- then VS navigation works normally (click errors → open Windows file)
+
+#### F) Debugging for Mode 2
+Debug dropdown entries should still be generated by `FileScanner` (Open Folder scanning) from Windows-visible files. For Mode 2:
+- Cargo produces Linux binaries under `C:\...\target\debug\<bin>` (extensionless ELF file)
+- We must ensure target filename rules are extensionless when `Target System == WSL`
+
+Required changes:
+- `WorkspaceExtensions.CreateTargetFileNameForWorkspace`:
+  - if Mode 2 WSL: return extensionless for bin targets (like Mode 1)
+  - else keep `.exe` (Windows)
+- `DebugLaunchTargetProvider`:
+  - If Mode 2 WSL:
+    - Convert `bstrExe` from Windows path `C:\...\target\debug\bin` to Linux `/mnt/c/.../target/debug/bin`
+    - Set `bstrPortName = SSH:wsl+<distro>`
+    - Set `bstrCurDir` to Linux working dir (`/mnt/c/...` or resolved)
+    - Keep existing Windows path unchanged otherwise
+
+Env handling:
+- In WSL debug, omit `bstrEnv` initially (use WSL environment).
+
+#### G) Tests for Mode 2
+Test discovery/execution should reuse the existing WSL execution path, but now mappings are `/mnt/...` instead of `\\wsl.localhost\...`.
+- Store test container and source file paths as Windows paths.
+- Convert to Linux paths only at execution time.
+
+### Performance notes (user concern)
+Mode 2 builds on `/mnt/c`, which can be slower and can be affected by Defender/AV.
+
+Mitigations:
+- Document recommended Defender exclusions for the workspace folder and `target/`.
+- Optional future stage (Mode 2b): “mirror-to-WSL build root”:
+  - Sync workspace to a WSL-local directory (e.g. `/home/<user>/.cache/rustanalyzer-vs/<workspace-id>`)
+  - Run cargo there (fast, avoids AV)
+  - Map diagnostics back to the Windows source tree (requires stable source mapping strategy)
+
+This “mirror” stage is conceptually closer to the C++ WSL toolset behavior, but it is intentionally postponed until Mode 2 works end-to-end.
+
+### Verification checklist for Mode 2
+- Open a Windows-local folder (e.g. `C:\Repos\trader-one`) in VS Open Folder.
+- Select `Target System = WSL: Debian`.
+- **Build**:
+  - `cargo build` runs via WSL and produces Linux binary under `target/debug/<bin>` (no `.exe`).
+- **Clippy / Fmt**:
+  - run via WSL and error paths open the correct Windows file.
+- **Debug dropdown**:
+  - runnable targets appear in the dropdown.
+- **F5**:
+  - launches WSL debug session using `SSH:wsl+Debian` and breakpoints hit.
+- **Test Explorer**:
+  - discovery and execution happen via WSL, and test navigation opens Windows files.
 
 ### 2) Introduce a single “command invocation” abstraction
 The current code mixes:

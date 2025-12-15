@@ -27,12 +27,14 @@ public sealed class StringBuildMessagePreprocessor
         {
             // Allow spaces in paths by matching lazily up to " at line ".
             var match = Regex.Match(x, @"^Diff in (?<path>\/.*?) at line (?<line>\d+)\:");
-            if (match.Success && wsl != null)
+            if (match.Success)
             {
                 var linuxPath = match.Groups["path"].Value;
                 var line = match.Groups["line"].Value;
-                var uncPath = wsl.ToUncPath(linuxPath);
-                return $"{uncPath}({line},1): warning: diffs created by fmt";
+                var winPath = wsl != null
+                    ? wsl.ToUncPath(linuxPath)
+                    : (WslPathMapper.TryWslToWindowsPath(linuxPath, out var mapped) ? mapped : linuxPath);
+                return $"{winPath}({line},1): warning: diffs created by fmt";
             }
             return x;
         },
@@ -42,14 +44,16 @@ public sealed class StringBuildMessagePreprocessor
         {
             // Allow spaces in paths by matching lazily up to ":<line>:<col>".
             var match = Regex.Match(x, @"^( )*\-\-\> (?<path>\/.*?):(?<line>\d+):(?<col>\d+)");
-            if (match.Success && wsl != null)
+            if (match.Success)
             {
                 var indent = match.Groups[1].Value;
                 var linuxPath = match.Groups["path"].Value;
                 var line = match.Groups["line"].Value;
                 var col = match.Groups["col"].Value;
-                var uncPath = wsl.ToUncPath(linuxPath);
-                return $"{uncPath}({line},{col}): error: clippy\0{indent}--> {linuxPath}:{line}:{col}";
+                var winPath = wsl != null
+                    ? wsl.ToUncPath(linuxPath)
+                    : (WslPathMapper.TryWslToWindowsPath(linuxPath, out var mapped) ? mapped : linuxPath);
+                return $"{winPath}({line},{col}): error: clippy\0{indent}--> {linuxPath}:{line}:{col}";
             }
             return x;
         },
@@ -76,10 +80,11 @@ public sealed class StringBuildMessagePreprocessor
 
     public IEnumerable<string> Preprocess(PathEx rootPath, string message)
     {
-        // Check if rootPath is a WSL workspace
-        WslInfo.TryParse(rootPath, out var wslInfo);
+        // Mode 1: WSL UNC workspace
+        // Mode 2: Windows-local workspace + WSL execution (if selected)
+        var isWsl = TargetSystemSelection.TryGetWslExecutionContext(rootPath, out var wslInfo, out _);
 
-        var processors = wslInfo != null ? WslProcessors : WindowsProcessors;
+        var processors = isWsl ? WslProcessors : WindowsProcessors;
         return processors.Aggregate(message, (acc, e) => e(rootPath, wslInfo, acc)).Split(new[] { '\0' }, StringSplitOptions.RemoveEmptyEntries);
     }
 }

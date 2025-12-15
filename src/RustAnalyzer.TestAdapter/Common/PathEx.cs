@@ -16,6 +16,15 @@ public readonly struct PathEx : IEquatable<PathEx>
     {
         EnsureArg.IsNotNull(path, nameof(path));
 
+#if DEBUG
+        // Linux absolute paths must not be stored in PathEx because it normalizes '/' -> '\'.
+        // Keep Linux paths as strings and map them to Windows (UNC or drive) before converting to PathEx.
+        if (path.StartsWith("/", StringComparison.Ordinal))
+        {
+            Debug.Assert(false, $"Do not construct PathEx from a Linux path: '{path}'.");
+        }
+#endif
+
         _path = path.Replace("/", @"\");
     }
 

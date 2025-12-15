@@ -4,19 +4,20 @@ using System.ComponentModel.Composition;
 using KS.RustAnalyzer.Infrastructure;
 using KS.RustAnalyzer.TestAdapter;
 using KS.RustAnalyzer.TestAdapter.Common;
+using Microsoft.VisualStudio.Shell;
 using Microsoft.VisualStudio.Workspace;
 using Microsoft.VisualStudio.Workspace.Indexing;
 
 namespace KS.RustAnalyzer.Editor;
 
+// NOTE:
+// Use the simplest SDK-sample-style constructor for maximum compatibility across VS versions.
+// (VS 2026 / 18.x has been sensitive to richer/named-arg overloads for some workspace exports.)
 [ExportFileScanner(
-    type: ProviderType,
-    language: "Rust",
-    // VS Open Folder APIs expect file extensions here (not full filenames).
-    // Include both ".toml" and ".rs" so Cargo.toml is always scanned (including on newer VS builds).
-    supportedFileExtensions: new[] { Constants.ManifestFileExtension, Constants.RustFileExtension, },
-    supportedTypes: new[] { typeof(IReadOnlyCollection<FileDataValue>), typeof(IReadOnlyCollection<FileReferenceInfo>) },
-    priority: ProviderPriority.Normal)]
+    ProviderType,
+    "RustAnalyzerFileScanner",
+    new[] { Constants.ManifestFileExtension, Constants.RustFileExtension, },
+    new[] { typeof(IReadOnlyCollection<FileDataValue>), typeof(IReadOnlyCollection<FileReferenceInfo>) })]
 public class FileScannerFactory : IWorkspaceProviderFactory<IFileScanner>
 {
     public const string ProviderType = "F5628EAD-0001-4683-B597-D8314B971ED6";
@@ -34,6 +35,15 @@ public class FileScannerFactory : IWorkspaceProviderFactory<IFileScanner>
 
     public IFileScanner CreateProvider(IWorkspace workspaceContext)
     {
+        try
+        {
+            ActivityLog.LogInformation("rust-analyzer.vs", $"FileScannerFactory.CreateProvider Location='{workspaceContext?.Location}'");
+        }
+        catch
+        {
+            // Best-effort diagnostics only.
+        }
+
         T.TrackEvent(
             "Create Scanner",
             new[] { ("Location", workspaceContext.Location) });
