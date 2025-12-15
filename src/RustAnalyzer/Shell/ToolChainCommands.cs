@@ -3,7 +3,6 @@ using System.Linq;
 using System.Threading.Tasks;
 using Community.VisualStudio.Toolkit;
 using KS.RustAnalyzer.Infrastructure;
-using KS.RustAnalyzer.Remote;
 using KS.RustAnalyzer.TestAdapter;
 using KS.RustAnalyzer.TestAdapter.Cargo;
 using KS.RustAnalyzer.TestAdapter.Common;
@@ -39,10 +38,7 @@ public abstract class BaseToolchainCommand<T> : BaseCommand<T>
         }
 
         var path = selectedItems.First();
-
-        // For WSL paths, File.Exists might not work properly, so just check if it's a manifest
-        var isWslPath = WslPathMapper.TryGetDistroName(path, out _);
-        Command.Visible = Command.Enabled = path.IsManifest() && (isWslPath || path.FileExists());
+        Command.Visible = Command.Enabled = path.IsManifest() && path.FileExists();
     }
 
     protected override async Task ExecuteAsync(OleMenuCmdEventArgs e)
@@ -96,20 +92,14 @@ public abstract class BaseBuildToolChainCommand<T> : BaseCommand<T>
         await RustAnalyzerPackage.JTF.SwitchToMainThreadAsync();
 
         var selectedPath = GetManifestPath();
-        if (!selectedPath.HasValue)
-        {
-            return;
-        }
-
-        await CmdServices.ExecuteToolchainOperationAsync(Operation, selectedPath.Value, GetOptions);
+        await CmdServices.ExecuteToolchainOperationAsync(Operation, selectedPath, GetOptions);
     }
 
-    protected PathEx? GetManifestPath()
+    protected PathEx GetManifestPath()
     {
         ThreadHelper.ThrowIfNotOnUIThread();
 
-        var workspaceRoot = CmdServices.GetWorkspaceRoot();
-        return workspaceRoot.HasValue ? workspaceRoot.Value + Constants.ManifestFileName2 : null;
+        return CmdServices.GetWorkspaceRoot() + Constants.ManifestFileName2;
     }
 
     protected string GetToolArgsFromSettings(string argName)
@@ -118,13 +108,7 @@ public abstract class BaseBuildToolChainCommand<T> : BaseCommand<T>
             {
                 await RustAnalyzerPackage.JTF.SwitchToMainThreadAsync();
 
-                var manifestPath = GetManifestPath();
-                if (!manifestPath.HasValue)
-                {
-                    return string.Empty;
-                }
-
-                return await CmdServices.SettingsService.GetAsync(argName, manifestPath.Value);
+                return await CmdServices.SettingsService.GetAsync(argName, GetManifestPath());
             });
 
     private bool IsCommandActive()
@@ -132,26 +116,7 @@ public abstract class BaseBuildToolChainCommand<T> : BaseCommand<T>
         ThreadHelper.ThrowIfNotOnUIThread();
 
         var workspaceRoot = CmdServices.GetWorkspaceRoot();
-        if (workspaceRoot == null || !CmdServices.IsIdeInDesignMode())
-        {
-            return false;
-        }
-
-        // Check if Cargo.toml exists at the workspace root
-        var manifestPath = workspaceRoot.Value + Constants.ManifestFileName2;
-        if (manifestPath.FileExists())
-        {
-            return true;
-        }
-
-        // For WSL workspaces, enable commands even if the file check fails
-        // (UNC paths might have issues with File.Exists)
-        if (WslPathMapper.TryGetDistroName(workspaceRoot.Value, out _))
-        {
-            return true;
-        }
-
-        return false;
+        return (workspaceRoot + Constants.ManifestFileName2).FileExists() && CmdServices.IsIdeInDesignMode();
     }
 }
 

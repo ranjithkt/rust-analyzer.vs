@@ -190,17 +190,29 @@ public sealed class CmdServices
             .Where(p => p.HasValue).Select(p => p.Value);
     }
 
-    public PathEx? GetWorkspaceRoot()
+    public PathEx GetWorkspaceRoot()
     {
         ThreadHelper.ThrowIfNotOnUIThread();
 
+        // First, try Open Folder workspace (IVsFolderWorkspaceService)
+        var currentWorkspace = FolderWorkspaceService?.CurrentWorkspace;
+        if (currentWorkspace != null)
+        {
+            var location = currentWorkspace.Location;
+            if (!string.IsNullOrEmpty(location))
+            {
+                return (PathEx)location;
+            }
+        }
+
+        // Fallback: try solution-based workspace
         string workspaceRoot = null;
         if (ErrorHandler.Failed(Solution?.GetSolutionInfo(out workspaceRoot, out var _, out var _) ?? VSConstants.E_FAIL))
         {
             L?.WriteError("Unable to determine workspace root.");
         }
 
-        return (PathEx?)workspaceRoot;
+        return (PathEx)workspaceRoot;
     }
 
     public bool IsIdeInDesignMode()

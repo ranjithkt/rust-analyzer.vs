@@ -120,22 +120,14 @@ public class FileScanner : IFileScanner, IFileScannerUpToDateCheck
 
             if (package.IsPackage)
             {
-                var runnableTargets = package.GetTargets().Where(t => t.IsRunnable).ToList();
-                System.Diagnostics.Debug.WriteLine($"[FileScanner.GetFileDataValues] Runnable targets: {runnableTargets.Count}");
-
-                // For WSL/Linux targets, use cppgdb debug type; for Windows use native
-                var debugType = targetKind == TargetKind.Local
-                    ? LaunchConfigurationConstants.NativeOptionKey
-                    : "cppgdb";  // GDB-based debugging for Linux/WSL
-
-                foreach (var target in runnableTargets)
+                // Match original pattern: ProgramKey = package path (used to look up package in DebugLaunchTargetProvider)
+                // The actual binary path is computed in DebugLaunchTargetProvider from target.GetPath(profile)
+                foreach (var target in package.GetTargets().Where(t => t.IsRunnable))
                 {
-                    System.Diagnostics.Debug.WriteLine($"[FileScanner.GetFileDataValues] Creating debug config for target: {target.QualifiedTargetFileName}, DebugType: {debugType}");
-
                     var launchSettings = new PropertySettings
                     {
                         [LaunchConfigurationConstants.NameKey] = target.QualifiedTargetFileName,
-                        [LaunchConfigurationConstants.DebugTypeKey] = debugType,
+                        [LaunchConfigurationConstants.DebugTypeKey] = LaunchConfigurationConstants.NativeOptionKey,
                         [LaunchConfigurationConstants.ProjectKey] = (string)package.FullPath,
                         [LaunchConfigurationConstants.ProjectTargetKey] = target.QualifiedTargetFileName,
                         [LaunchConfigurationConstants.ProgramKey] = (string)package.FullPath,
@@ -175,11 +167,6 @@ public class FileScanner : IFileScanner, IFileScannerUpToDateCheck
         }
 
         // For examples.
-        // Use same debug type logic as for regular targets
-        var exampleDebugType = targetKind == TargetKind.Local
-            ? LaunchConfigurationConstants.NativeOptionKey
-            : "cppgdb";
-
         var forExamples = package.GetTargets()
             .Where(t => t.IsExample())
             .Where(t => t.SourcePath == filePath)
@@ -191,7 +178,7 @@ public class FileScanner : IFileScanner, IFileScannerUpToDateCheck
                     var launchSettings = new PropertySettings
                     {
                         [LaunchConfigurationConstants.NameKey] = t.QualifiedTargetFileName,
-                        [LaunchConfigurationConstants.DebugTypeKey] = exampleDebugType,
+                        [LaunchConfigurationConstants.DebugTypeKey] = LaunchConfigurationConstants.NativeOptionKey,
                         [LaunchConfigurationConstants.ProjectKey] = (string)t.SourcePath,
                         [LaunchConfigurationConstants.ProjectTargetKey] = t.QualifiedTargetFileName,
                         [LaunchConfigurationConstants.ProgramKey] = (string)package.FullPath,
