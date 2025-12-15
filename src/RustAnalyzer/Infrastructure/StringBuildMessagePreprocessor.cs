@@ -25,11 +25,12 @@ public sealed class StringBuildMessagePreprocessor
         // Handle rustfmt diff output with Linux paths: "Diff in /home/.../file.rs at line N:"
         (PathEx rp, WslInfo wsl, string x) =>
         {
-            var match = Regex.Match(x, @"^Diff in (\/[^\s]+) at line (\d*)\:");
+            // Allow spaces in paths by matching lazily up to " at line ".
+            var match = Regex.Match(x, @"^Diff in (?<path>\/.*?) at line (?<line>\d+)\:");
             if (match.Success && wsl != null)
             {
-                var linuxPath = match.Groups[1].Value;
-                var line = match.Groups[2].Value;
+                var linuxPath = match.Groups["path"].Value;
+                var line = match.Groups["line"].Value;
                 var uncPath = wsl.ToUncPath(linuxPath);
                 return $"{uncPath}({line},1): warning: diffs created by fmt";
             }
@@ -39,13 +40,14 @@ public sealed class StringBuildMessagePreprocessor
         // Handle clippy/rustc output with Linux absolute paths: "--> /home/.../file.rs:line:col"
         (PathEx rp, WslInfo wsl, string x) =>
         {
-            var match = Regex.Match(x, @"^( )*\-\-\> (\/[^\s:]+)\:(\d+):(\d+)");
+            // Allow spaces in paths by matching lazily up to ":<line>:<col>".
+            var match = Regex.Match(x, @"^( )*\-\-\> (?<path>\/.*?):(?<line>\d+):(?<col>\d+)");
             if (match.Success && wsl != null)
             {
                 var indent = match.Groups[1].Value;
-                var linuxPath = match.Groups[2].Value;
-                var line = match.Groups[3].Value;
-                var col = match.Groups[4].Value;
+                var linuxPath = match.Groups["path"].Value;
+                var line = match.Groups["line"].Value;
+                var col = match.Groups["col"].Value;
                 var uncPath = wsl.ToUncPath(linuxPath);
                 return $"{uncPath}({line},{col}): error: clippy\0{indent}--> {linuxPath}:{line}:{col}";
             }
@@ -55,13 +57,14 @@ public sealed class StringBuildMessagePreprocessor
         // Handle clippy/rustc output with relative paths (needs combining with workspace root)
         (PathEx rp, WslInfo wsl, string x) =>
         {
-            var match = Regex.Match(x, @"^( )*\-\-\> ([^\/][^\s:]+)\:(\d+):(\d+)");
-            if (match.Success && !match.Groups[2].Value.StartsWith("/"))
+            // Allow spaces in relative paths by matching lazily up to ":<line>:<col>".
+            var match = Regex.Match(x, @"^( )*\-\-\> (?<path>[^\/].*?):(?<line>\d+):(?<col>\d+)");
+            if (match.Success && !match.Groups["path"].Value.StartsWith("/"))
             {
                 var indent = match.Groups[1].Value;
-                var relativePath = match.Groups[2].Value;
-                var line = match.Groups[3].Value;
-                var col = match.Groups[4].Value;
+                var relativePath = match.Groups["path"].Value;
+                var line = match.Groups["line"].Value;
+                var col = match.Groups["col"].Value;
                 // Convert forward slashes in relative path to backslashes and combine with root
                 var normalizedPath = relativePath.Replace('/', '\\');
                 var fullPath = rp.Combine((PathEx)normalizedPath);
