@@ -426,9 +426,27 @@ public sealed class ToolchainService : IToolchainService
             // Convert it to a Windows UNC path
             test.SourcePath = wslInfo.ToUncPathEx(rawSourcePath);
         }
+        else if (wslInfo != null)
+        {
+            // WSL workspace but rawSourcePath extraction failed or path is relative.
+            // PathEx may have converted a Linux absolute path like "/home/..." to "\home\...".
+            // Check if it looks like a converted Linux absolute path (starts with \ but not \\).
+            var pathStr = (string)test.SourcePath;
+            if (pathStr.StartsWith(@"\") && !pathStr.StartsWith(@"\\"))
+            {
+                // Convert back to Linux format and then to UNC
+                var linuxPath = "/" + pathStr.Substring(1).Replace('\\', '/');
+                test.SourcePath = wslInfo.ToUncPathEx(linuxPath);
+            }
+            else
+            {
+                // Relative path - combine with workspace root
+                test.SourcePath = workspaceRoot + test.SourcePath;
+            }
+        }
         else
         {
-            // For Windows, combine with workspace root
+            // Windows workspace - combine with workspace root
             test.SourcePath = workspaceRoot + test.SourcePath;
         }
 

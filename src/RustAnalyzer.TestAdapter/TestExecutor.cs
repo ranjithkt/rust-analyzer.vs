@@ -129,7 +129,8 @@ public class TestExecutor : BaseTestExecutor, ITestExecutor
                 var wslArgs = new List<string> { "-d", wslInfo.DistroName, "--cd", linuxWorkingDir, "--exec", linuxExe };
                 wslArgs.AddRange(args);
 
-                var rc = fh.LaunchProcessWithDebuggerAttached(wslExePath, null, string.Join(" ", wslArgs), envDict);
+                // Use System32 as the Windows working directory for wsl.exe (consistent with RunInWsl)
+                var rc = fh.LaunchProcessWithDebuggerAttached(wslExePath, Environment.SystemDirectory, string.Join(" ", wslArgs), envDict);
                 if (rc != 0)
                 {
                     tl.L.WriteError("RunTestsFromOneSourceAsync launching WSL test under debugger - returned {0}.", rc);
