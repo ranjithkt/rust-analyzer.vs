@@ -385,6 +385,27 @@ Ship in stages:
 
 ---
 
+## VS SDK sample repo notes (VSSDK-Extensibility-Samples)
+
+You have the official samples at `C:\\Repos3\\VSSDK-Extensibility-Samples`. I searched that tree for WSL + debug-target-provider patterns (e.g., `ILaunchDebugTargetProvider`, `ExportLaunchDebugTarget`, `VsDebugTargetInfo(4)`, `IVsDebugger4`, `bstrPortName`, and `SSH:wsl+...`) and did **not** find an example that directly covers:
+
+- creating debug dropdown entries for folder-workspaces, or
+- launching a WSL/Linux debug session from an extension using the Workspace debug APIs.
+
+What *is* directly helpful is the **Open Folder** extensibility sample, because it demonstrates the same “folder workspace” extensibility model we’re already using in this repo:
+
+- **Workspace-scoped providers**: Providers are created per-workspace via `IWorkspaceProviderFactory<T>.CreateProvider(IWorkspace workspaceContext)`.
+  - See `Open_Folder_Extensibility\\C#\\SymbolScannerSample\\TxtFileSymbolScanner.cs` (scanner) and `...\\FileActionSample\\TxtFileContextProviderFactory.cs` (context provider).
+  - Takeaway for our WSL work: WSL detection should be workspace-scoped (based on `workspaceContext.Location`), and the WSL distro + UNC root should be cached per-workspace/provider instance rather than as global static state.
+
+- **Folder/workspace settings persistence**: The sample shows how to store per-workspace settings into the `.vs` workspace settings file.
+  - See `Open_Folder_Extensibility\\C#\\SettingsSample\\WordCountSettings.cs` using `workspaceContext.GetSettingsManager().GetAggregatedSettings(...)` and `GetPersistanceAsync(true)`.
+  - Takeaway for our WSL work: if we later add a “Target System” dropdown or allow overriding the detected distro, this settings mechanism is a good, SDK-aligned way to persist it *per opened folder*.
+
+Net: the sample repo reinforces the **right extension points for Open Folder mode** and **how to persist workspace settings**, but it doesn’t provide a ready-made WSL debugging implementation. Our plan’s WSL debugging portion still needs a small experimental spike to validate `bstrPortName = \"SSH:wsl+<distro>\"` and engine selection behavior on the VS versions we support.
+
+---
+
 ## Notes / open investigation items (resolve during implementation)
 
 - Does `[ExportLaunchDebugTarget(..., new[] { "" }, ...)]` work for extensionless binaries?
