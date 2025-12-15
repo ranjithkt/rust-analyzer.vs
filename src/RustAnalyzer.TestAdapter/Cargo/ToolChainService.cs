@@ -405,13 +405,26 @@ public sealed class ToolchainService : IToolchainService
 
     private static TestSuiteInfo.TestInfo DeserializeTest(PathEx workspaceRoot, string serializedVal, WslInfo wslInfo)
     {
+        // NOTE: We need to extract the source_path from the raw JSON BEFORE deserialization,
+        // because PathEx constructor converts "/" to "\" which breaks IsLinuxAbsolutePath check.
+        string rawSourcePath = null;
+        try
+        {
+            var jsonObj = Newtonsoft.Json.Linq.JObject.Parse(serializedVal);
+            rawSourcePath = (string)jsonObj["source_path"];
+        }
+        catch
+        {
+            // If parsing fails, fall back to post-deserialization handling
+        }
+
         var test = JsonConvert.DeserializeObject<TestSuiteInfo.TestInfo>(serializedVal);
 
-        if (wslInfo != null && WslInfo.IsLinuxAbsolutePath(test.SourcePath))
+        if (wslInfo != null && rawSourcePath != null && WslInfo.IsLinuxAbsolutePath(rawSourcePath))
         {
             // For WSL, the source path from the test binary is a Linux absolute path
             // Convert it to a Windows UNC path
-            test.SourcePath = wslInfo.ToUncPathEx(test.SourcePath);
+            test.SourcePath = wslInfo.ToUncPathEx(rawSourcePath);
         }
         else
         {
