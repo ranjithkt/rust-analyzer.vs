@@ -726,8 +726,8 @@ public sealed class ToolchainService : IToolchainService
         redirector?.WriteLineWithoutProcessing($"");
 
         using var process = wslInfo != null
-            ? ToolchainServiceExtensions.RunCargoInWsl(wslInfo, argList, linuxWorkingDir, ct)
-            : ToolchainServiceExtensions.RunCargoInWsl(distroName, argList, linuxWorkingDir, ct);
+            ? ToolchainServiceExtensions.RunCargoInWsl(wslInfo, argList, linuxWorkingDir, redirector, ct)
+            : ToolchainServiceExtensions.RunCargoInWsl(distroName, argList, linuxWorkingDir, redirector, ct);
         var whnd = process.WaitHandle;
         if (whnd == null)
         {
@@ -735,35 +735,23 @@ public sealed class ToolchainService : IToolchainService
             return false;
         }
 
-        // Set up output redirection
-        process.Exited += (s, e) => { };
-
-        var finished = await Task.Run(() => whnd.WaitOne(), ct);
-        if (finished)
+        try
         {
-            process.Wait();
-
-            // Write output lines
-            foreach (var line in process.StandardOutputLines)
-            {
-                redirector?.WriteLine(line);
-            }
-
-            foreach (var line in process.StandardErrorLines)
-            {
-                redirector?.WriteErrorLine(line);
-            }
-
-            redirector?.WriteLineWithoutProcessing("==== Build step (WSL): Finished ====\n");
-
-            return process.ExitCode == 0;
+            // Wait for the process to exit, but allow cancellation.
+            await Task.Run(() => whnd.WaitOne(), ct);
         }
-        else
+        catch (OperationCanceledException)
         {
             process.Kill();
             redirector?.WriteErrorLineWithoutProcessing("====  Build step (WSL) canceled ====\n");
             return false;
         }
+
+        // Ensure exit code is available.
+        process.Wait();
+
+        redirector?.WriteLineWithoutProcessing("==== Build step (WSL): Finished ====\n");
+        return process.ExitCode == 0;
     }
 
     /// <summary>

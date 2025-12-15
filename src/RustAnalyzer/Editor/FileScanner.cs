@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
@@ -17,6 +18,8 @@ namespace KS.RustAnalyzer.Editor;
 public class FileScanner : IFileScanner, IFileScannerUpToDateCheck
 {
     private readonly IMetadataService _mds;
+    private readonly ConcurrentDictionary<string, string> _lastScanTargetSystemByFilePath =
+        new(StringComparer.OrdinalIgnoreCase);
 
     public FileScanner(IMetadataService mds)
     {
@@ -31,6 +34,10 @@ public class FileScanner : IFileScanner, IFileScannerUpToDateCheck
         {
             return null;
         }
+
+        // Track the target system used for this scan so we can invalidate caches when the user
+        // switches Target System (Local vs WSL) without any file timestamps changing.
+        _lastScanTargetSystemByFilePath[filePath] = GetTargetSystemKey(filePath);
 
         if (typeof(T) == FileScannerTypeConstants.FileDataValuesType)
         {
@@ -54,6 +61,14 @@ public class FileScanner : IFileScanner, IFileScannerUpToDateCheck
         {
             try
             {
+                var currentTarget = GetTargetSystemKey(filePath);
+                if (_lastScanTargetSystemByFilePath.TryGetValue(filePath, out var lastTarget) &&
+                    !string.Equals(lastTarget, currentTarget, StringComparison.OrdinalIgnoreCase))
+                {
+                    // Force rescan when switching Local <-> WSL so we don't keep showing stale debug targets.
+                    return false;
+                }
+
                 var lastWrite = File.GetLastWriteTimeUtc(filePath);
                 return lastScanTimestamp.HasValue && lastWrite < lastScanTimestamp.Value.UtcDateTime;
             }
@@ -66,6 +81,18 @@ public class FileScanner : IFileScanner, IFileScannerUpToDateCheck
         }
 
         return false;
+    }
+
+    private static string GetTargetSystemKey(string filePath)
+    {
+        // Mode 1: workspace on WSL UNC path -> true (distro parsed from UNC)
+        // Mode 2: Windows-local workspace + WSL selected -> true (distro from env vars)
+        if (TargetSystemSelection.TryGetWslExecutionContext((PathEx)filePath, out _, out var distro))
+        {
+            return $"wsl:{distro}";
+        }
+
+        return "local";
     }
 
     private Task<bool> IsValidFileAsync(string filePath)

@@ -310,13 +310,31 @@ public static class ToolchainServiceExtensions
     {
         EnsureArg.IsNotNull(wslInfo, nameof(wslInfo));
 
-        return RunInWsl(wslInfo.DistroName, command, args, linuxWorkingDir, env, ct);
+        return RunInWsl(wslInfo.DistroName, command, args, linuxWorkingDir, env, redirector: null, ct);
+    }
+
+    /// <summary>
+    /// Runs a process in WSL. Streams output via the provided redirector.
+    /// </summary>
+    public static ProcessRunner RunInWsl(WslInfo wslInfo, string command, string[] args, string linuxWorkingDir, IDictionary<string, string> env, ProcessOutputRedirector redirector, CancellationToken ct)
+    {
+        EnsureArg.IsNotNull(wslInfo, nameof(wslInfo));
+
+        return RunInWsl(wslInfo.DistroName, command, args, linuxWorkingDir, env, redirector, ct);
     }
 
     /// <summary>
     /// Runs a process in WSL by distro name. Supports "Mode 2" where workspace is Windows-local.
     /// </summary>
     public static ProcessRunner RunInWsl(string distroName, string command, string[] args, string linuxWorkingDir, IDictionary<string, string> env, CancellationToken ct)
+    {
+        return RunInWsl(distroName, command, args, linuxWorkingDir, env, redirector: null, ct);
+    }
+
+    /// <summary>
+    /// Runs a process in WSL by distro name. Supports streaming output via <paramref name="redirector"/>.
+    /// </summary>
+    public static ProcessRunner RunInWsl(string distroName, string command, string[] args, string linuxWorkingDir, IDictionary<string, string> env, ProcessOutputRedirector redirector, CancellationToken ct)
     {
         EnsureArg.IsNotNullOrWhiteSpace(distroName, nameof(distroName));
 
@@ -356,7 +374,16 @@ public static class ToolchainServiceExtensions
 
         // NOTE: ProcessStartInfo.WorkingDirectory must be a valid Windows directory.
         // wsl.exe handles the Linux-side cwd via --cd, but we still set a safe Windows cwd here.
-        return ProcessRunner.Run(wslExePath, wslArgs.ToArray(), Environment.SystemDirectory, ImmutableDictionary<string, string>.Empty, ct);
+        // Use the redirector overload so build output can stream live.
+        var envForProc = env ?? (IDictionary<string, string>)ImmutableDictionary<string, string>.Empty;
+        return ProcessRunner.Run(
+            wslExePath,
+            wslArgs,
+            Environment.SystemDirectory,
+            envForProc,
+            visible: false,
+            redirector: redirector,
+            cancellationToken: ct);
     }
 
     /// <summary>
@@ -370,6 +397,16 @@ public static class ToolchainServiceExtensions
     public static ProcessRunner RunCargoInWsl(string distroName, string[] cargoArgs, string linuxWorkingDir, CancellationToken ct)
     {
         return RunInWsl(distroName, Constants.WslCargoExe, cargoArgs, linuxWorkingDir, null, ct);
+    }
+
+    public static ProcessRunner RunCargoInWsl(WslInfo wslInfo, string[] cargoArgs, string linuxWorkingDir, ProcessOutputRedirector redirector, CancellationToken ct)
+    {
+        return RunInWsl(wslInfo, Constants.WslCargoExe, cargoArgs, linuxWorkingDir, env: null, redirector: redirector, ct);
+    }
+
+    public static ProcessRunner RunCargoInWsl(string distroName, string[] cargoArgs, string linuxWorkingDir, ProcessOutputRedirector redirector, CancellationToken ct)
+    {
+        return RunInWsl(distroName, Constants.WslCargoExe, cargoArgs, linuxWorkingDir, env: null, redirector: redirector, ct);
     }
 
     /// <summary>

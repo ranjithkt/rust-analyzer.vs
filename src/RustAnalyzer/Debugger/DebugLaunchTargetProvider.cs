@@ -29,6 +29,7 @@ public sealed class DebugLaunchTargetProvider : ILaunchDebugTargetProvider
 {
     public const string ProviderType = "{72D3FCEF-1111-4266-B8DD-D3ED06E35A2B}";
     public static readonly Guid ProviderTypeGuid = new(ProviderType);
+    private static readonly Guid MiEngineGuid = new("0D0A64AB-1B9D-4E8B-91A5-7A460D3A1A3D");
 
     [Import]
     public ILogger L { get; set; }
@@ -250,7 +251,8 @@ public sealed class DebugLaunchTargetProvider : ILaunchDebugTargetProvider
             cbSize = (uint)System.Runtime.InteropServices.Marshal.SizeOf<VsDebugTargetInfo>(),
             grfLaunch = (uint)(noDebugFlag | __VSDBGLAUNCHFLAGS.DBGLAUNCH_Silent | __VSDBGLAUNCHFLAGS.DBGLAUNCH_StopDebuggingOnEnd),
             fSendStdoutToOutputWindow = 0,
-            clsidCustom = DebugEnginesGuids.NativeOnly_guid,
+            // WSL/Linux debugging requires MIEngine (GDB/LLDB MI debug engine), not the Windows native-only engine.
+            clsidCustom = MiEngineGuid,
         };
     }
 
