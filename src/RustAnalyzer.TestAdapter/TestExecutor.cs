@@ -138,11 +138,21 @@ public class TestExecutor : BaseTestExecutor, ITestExecutor
                 // Use wsl.exe to run the test, but note that debugger attach may not work correctly
                 // Users can debug tests by running them individually with F5
                 var wslExePath = WslInfo.GetWslExePath();
-                var wslArgs = new List<string> { "-d", wslInfo.DistroName, "--cd", linuxWorkingDir, "--exec", linuxExe };
+                var wslArgs = new List<string> { "-d", wslInfo.DistroName, "--cd", linuxWorkingDir, "--exec" };
+                if (envWsl != null && envWsl.Any())
+                {
+                    wslArgs.Add("env");
+                    foreach (var kv in envWsl.Where(kv => !string.IsNullOrWhiteSpace(kv.Key)))
+                    {
+                        wslArgs.Add($"{kv.Key}={kv.Value ?? string.Empty}");
+                    }
+                }
+
+                wslArgs.Add(linuxExe);
                 wslArgs.AddRange(args);
 
                 // Use System32 as the Windows working directory for wsl.exe (consistent with RunInWsl)
-                var rc = fh.LaunchProcessWithDebuggerAttached(wslExePath, Environment.SystemDirectory, ProcessRunner.GetArguments(wslArgs, quoteArgs: true), envWsl);
+                var rc = fh.LaunchProcessWithDebuggerAttached(wslExePath, Environment.SystemDirectory, ProcessRunner.GetArguments(wslArgs, quoteArgs: true), ImmutableDictionary<string, string>.Empty);
                 if (rc != 0)
                 {
                     tl.L.WriteError("RunTestsFromOneSourceAsync launching WSL test under debugger - returned {0}.", rc);
