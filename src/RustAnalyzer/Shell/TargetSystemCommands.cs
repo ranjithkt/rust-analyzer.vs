@@ -168,13 +168,36 @@ public sealed class TargetSystemComboCommand : BaseRustAnalyzerCommand<TargetSys
 
         try
         {
+            // Ensure distro list is populated so we can validate persisted settings.
+            // This also strips any redirected-output NULs from wsl.exe output.
+            var validTargets = TemporaryTargetSystemStore.TargetSystems;
+
             var mode = ThreadHelper.JoinableTaskFactory.Run(async () => await ss.GetAsync(SettingsInfo.TypeTargetSystem, workspaceRoot));
             var distro = ThreadHelper.JoinableTaskFactory.Run(async () => await ss.GetAsync(SettingsInfo.TypeWslDistroName, workspaceRoot));
 
             if (string.Equals(mode, "wsl", StringComparison.OrdinalIgnoreCase) && !string.IsNullOrWhiteSpace(distro))
             {
-                TemporaryTargetSystemStore.CurrentTargetSystem = $"WSL: {distro.Trim()}";
-                ApplyProcessTargetSystem("wsl", distro.Trim());
+                var cleaned = distro;
+                if (cleaned.IndexOf('\0') >= 0)
+                {
+                    cleaned = cleaned.Replace("\0", string.Empty);
+                }
+
+                cleaned = cleaned.Trim();
+                var candidate = $"WSL: {cleaned}";
+
+                // If the distro from settings isn't currently installed (per wsl -l -q),
+                // don't show it as selected (it will lead to WSL_E_DISTRO_NOT_FOUND later).
+                if (validTargets.Contains(candidate, StringComparer.OrdinalIgnoreCase))
+                {
+                    TemporaryTargetSystemStore.CurrentTargetSystem = candidate;
+                    ApplyProcessTargetSystem("wsl", cleaned);
+                }
+                else
+                {
+                    TemporaryTargetSystemStore.CurrentTargetSystem = "Local Machine";
+                    ApplyProcessTargetSystem("local", null);
+                }
             }
             else
             {
