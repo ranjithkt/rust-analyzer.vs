@@ -37,7 +37,7 @@ public static class TargetSystemStore
     {
         lock (_lock)
         {
-            if (_service == null && workspaceRoot != null)
+            if (_service == null && workspaceRoot != default)
             {
                 _currentWorkspaceRoot = workspaceRoot;
 
@@ -336,26 +336,6 @@ public static class TargetSystemStore
 [Command(PackageGuids.guidRustAnalyzerTargetSystemCmdSetString, PackageIds.IdTargetSystemCombo)]
 public sealed class TargetSystemComboCommand : BaseRustAnalyzerCommand<TargetSystemComboCommand>
 {
-    protected override bool IsCommandActive()
-    {
-        ThreadHelper.ThrowIfNotOnUIThread();
-
-        var workspaceRoot = CmdServices.GetWorkspaceRoot();
-        if (workspaceRoot == null || !CmdServices.IsIdeInDesignMode())
-        {
-            return false;
-        }
-
-        // For WSL workspaces, always show the target combo
-        if (WslPathMapper.TryGetDistroName(workspaceRoot.Value, out _))
-        {
-            return true;
-        }
-
-        // For local workspaces, check if there's a Cargo.toml at the root
-        return (workspaceRoot.Value + Constants.ManifestFileName2).FileExists();
-    }
-
     protected override void ExecuteCore(object sender, OleMenuCmdEventArgs eventArgs)
     {
         EnsureArg.IsNotNull(eventArgs);
@@ -382,26 +362,6 @@ public sealed class TargetSystemComboCommand : BaseRustAnalyzerCommand<TargetSys
 [Command(PackageGuids.guidRustAnalyzerTargetSystemCmdSetString, PackageIds.IdTargetSystemComboGetList)]
 public sealed class TargetSystemComboGetListCommand : BaseRustAnalyzerCommand<TargetSystemComboGetListCommand>
 {
-    protected override bool IsCommandActive()
-    {
-        ThreadHelper.ThrowIfNotOnUIThread();
-
-        var workspaceRoot = CmdServices.GetWorkspaceRoot();
-        if (workspaceRoot == null || !CmdServices.IsIdeInDesignMode())
-        {
-            return false;
-        }
-
-        // For WSL workspaces, always show the target combo
-        if (WslPathMapper.TryGetDistroName(workspaceRoot.Value, out _))
-        {
-            return true;
-        }
-
-        // For local workspaces, check if there's a Cargo.toml at the root
-        return (workspaceRoot.Value + Constants.ManifestFileName2).FileExists();
-    }
-
     protected override void ExecuteCore(object sender, OleMenuCmdEventArgs eventArgs)
     {
         ThreadHelper.ThrowIfNotOnUIThread();
@@ -413,9 +373,7 @@ public sealed class TargetSystemComboGetListCommand : BaseRustAnalyzerCommand<Ta
 
         // Get workspace root to initialize the service if needed
         var workspaceRoot = CmdServices.GetWorkspaceRoot();
-        var targets = workspaceRoot.HasValue
-            ? TargetSystemStore.GetAvailableTargetDisplayNames(workspaceRoot.Value)
-            : new[] { LocalTargetSystem.Instance.DisplayName };
+        var targets = TargetSystemStore.GetAvailableTargetDisplayNames(workspaceRoot);
 
         Marshal.GetNativeVariantForObject(targets, vOut);
     }

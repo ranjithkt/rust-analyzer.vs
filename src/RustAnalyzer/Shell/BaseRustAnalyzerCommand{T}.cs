@@ -1,7 +1,6 @@
 using System;
 using System.Threading.Tasks;
 using Community.VisualStudio.Toolkit;
-using KS.RustAnalyzer.Remote;
 using KS.RustAnalyzer.TestAdapter;
 using KS.RustAnalyzer.TestAdapter.Common;
 using Microsoft.VisualStudio.ComponentModelHost;
@@ -48,27 +47,7 @@ public abstract class BaseRustAnalyzerCommand<T> : BaseCommand<T>
         ThreadHelper.ThrowIfNotOnUIThread();
 
         var workspaceRoot = CmdServices.GetWorkspaceRoot();
-        if (workspaceRoot == null || !CmdServices.IsIdeInDesignMode())
-        {
-            return false;
-        }
-
-        // For WSL workspaces, the file check should work via UNC path
-        // But we also accept WSL workspaces more leniently
-        var manifestPath = workspaceRoot.Value + Constants.ManifestFileName2;
-        if (manifestPath.FileExists())
-        {
-            return true;
-        }
-
-        // For WSL workspaces where the file check might fail, still enable commands
-        // The actual manifest will be found when the command executes
-        if (WslPathMapper.TryGetDistroName(workspaceRoot.Value, out _))
-        {
-            return true;
-        }
-
-        return false;
+        return (workspaceRoot + Constants.ManifestFileName2).FileExists() && CmdServices.IsIdeInDesignMode();
     }
 
     protected abstract void ExecuteCore(object sender, OleMenuCmdEventArgs eventArgs);
