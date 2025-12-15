@@ -96,7 +96,7 @@ public static class BuildJsonOutputParser
         // Check if workspace is WSL to handle path mapping
         WslInfo.TryParse(workspaceRoot, out var wslInfo);
 
-        var srcPath = (string)obj.target.src_path.Value;
+        var srcPath = TryGetString(obj, "target.src_path");
         var resolvedSrcPath = ResolvePathForVs(srcPath, workspaceRoot, wslInfo);
 
         var msg = new DetailedBuildMessage
@@ -177,12 +177,40 @@ public static class BuildJsonOutputParser
 
     private static string GetProjectFile(dynamic obj)
     {
-        if (obj.manifest_path != null && obj.manifest_path.Value != null)
+        var manifestPath = TryGetString(obj, "manifest_path");
+        if (!string.IsNullOrEmpty(manifestPath))
         {
-            return (string)obj.manifest_path.Value;
+            return manifestPath;
         }
 
-        return (string)obj.package_id.Value;
+        // Fallback: use package_id if present, else return empty string (don't throw).
+        return TryGetString(obj, "package_id") ?? string.Empty;
+    }
+
+    private static string TryGetString(dynamic obj, string jsonPath)
+    {
+        try
+        {
+            if (obj == null)
+            {
+                return null;
+            }
+
+            var token = (JToken)obj;
+            var selected = token.SelectToken(jsonPath);
+            if (selected == null || selected.Type == JTokenType.Null)
+            {
+                return null;
+            }
+
+            return selected.Type == JTokenType.String
+                ? selected.Value<string>()
+                : selected.ToString();
+        }
+        catch
+        {
+            return null;
+        }
     }
 
     private static dynamic GetMessageCode(dynamic obj)

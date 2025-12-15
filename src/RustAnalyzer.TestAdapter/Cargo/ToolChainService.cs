@@ -298,7 +298,8 @@ public sealed class ToolchainService : IToolchainService
                 var testExeBuildInfos = proc.StandardErrorLines
                     .Select(l => regex.Matches(l))
                     .Where(m => m.Count > 0 && m[0].Groups.Count >= 4)
-                    .Select(m => ParseTestExeMatch(m[0], isWsl, wslInfo));
+                    .Select(m => ParseTestExeMatch(m[0], isWsl, wslInfo))
+                    .ToArray();
 
                 if (!testExeBuildInfos.Any())
                 {
@@ -311,8 +312,23 @@ public sealed class ToolchainService : IToolchainService
                 PathEx[] exes;
                 if (isWsl)
                 {
-                    // For WSL, convert Linux paths to UNC paths
-                    exes = testExeBuildInfos.Select(x => wslInfo.ToUncPathEx(x.Exe)).ToArray();
+                    // For WSL, cargo may emit either absolute Linux paths or paths relative to the --cd directory.
+                    // Convert both forms to UNC paths safely.
+                    var linuxWorkingDir = wslInfo.ToLinuxPath(workingDir);
+                    try
+                    {
+                        exes = testExeBuildInfos.Select(x => ConvertWslTestExePathToUnc(x.Exe, linuxWorkingDir, wslInfo)).ToArray();
+                    }
+                    catch (Exception ex)
+                    {
+                        var raw = string.Join(" | ", testExeBuildInfos.Select(i => i.Exe ?? "<null>"));
+                        var e = new InvalidOperationException(
+                            $"Unable to convert cargo-reported WSL test exe paths to UNC paths. Raw paths: {raw}. Command line '{proc.Arguments}'. Exit code: {proc.ExitCode}",
+                            ex);
+                        _tl.L.WriteError(e.Message);
+                        _tl.T.TrackException(e);
+                        throw e;
+                    }
                 }
                 else
                 {
@@ -349,6 +365,36 @@ public sealed class ToolchainService : IToolchainService
         var exe = match.Groups[3].Value;
         var src = (PathEx)match.Groups[2].Value;
         return (tc, exe, src);
+    }
+
+    private static PathEx ConvertWslTestExePathToUnc(string exePathFromCargo, string linuxWorkingDir, WslInfo wslInfo)
+    {
+        if (string.IsNullOrWhiteSpace(exePathFromCargo))
+        {
+            throw new ArgumentException("WSL test exe path was empty.", nameof(exePathFromCargo));
+        }
+
+        if (wslInfo == null)
+        {
+            throw new ArgumentNullException(nameof(wslInfo));
+        }
+
+        var normalized = exePathFromCargo.Trim().Replace('\\', '/');
+
+        // Absolute Linux path: convert directly.
+        if (WslInfo.IsLinuxAbsolutePath(normalized))
+        {
+            return wslInfo.ToUncPathEx(normalized);
+        }
+
+        // Relative Linux path: resolve relative to the WSL working directory used for cargo (--cd).
+        if (!WslInfo.IsLinuxAbsolutePath(linuxWorkingDir))
+        {
+            throw new ArgumentException($"Linux working directory '{linuxWorkingDir}' must be an absolute Linux path.", nameof(linuxWorkingDir));
+        }
+
+        var combined = linuxWorkingDir.TrimEnd('/') + "/" + normalized.TrimStart('/');
+        return wslInfo.ToUncPathEx(combined);
     }
 
     private BuildMessage[] OutputPreprocessorForCargoToolsWithoutJsonOutput(string msg) => new[] { new StringBuildMessage { Message = msg } };
