@@ -22,6 +22,11 @@ public static class TargetSystemSelection
         }
 
         var distro = Environment.GetEnvironmentVariable(Constants.RAVsWslDistroName);
+        if (!string.IsNullOrEmpty(distro) && distro.IndexOf('\0') >= 0)
+        {
+            distro = distro.Replace("\0", string.Empty);
+        }
+
         if (string.IsNullOrWhiteSpace(distro))
         {
             return false;

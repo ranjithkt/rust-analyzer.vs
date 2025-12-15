@@ -712,17 +712,18 @@ public sealed class ToolchainService : IToolchainService
         var cargoVersion = await ToolchainServiceExtensions.GetCommandOutputSingleLine("cargo", "--version", workingDir, ct);
         var toolVersion = await ToolchainServiceExtensions.GetCommandOutputSingleLine(opName, "--version", workingDir, ct);
 
+        // Convert arguments to array, handling quoted strings properly, and map any Windows paths to Linux.
+        var argList = ParseArgumentsForWsl(arguments, wslInfo);
+        var argsForLog = string.Join(" ", argList.Select(ProcessRunner.QuoteSingleArgument));
+
         redirector?.WriteLineWithoutProcessing($"");
         redirector?.WriteLineWithoutProcessing($"==== Build step (WSL): Started ====");
         redirector?.WriteLineWithoutProcessing($"        Using : {cargoVersion}");
         redirector?.WriteLineWithoutProcessing($"        Using : {toolVersion}");
         redirector?.WriteLineWithoutProcessing($"       Distro : {distroName}");
-        redirector?.WriteLineWithoutProcessing($"    Arguments : {arguments}");
+        redirector?.WriteLineWithoutProcessing($"    Arguments : {argsForLog}");
         redirector?.WriteLineWithoutProcessing($"   WorkingDir : {linuxWorkingDir} (WSL)");
         redirector?.WriteLineWithoutProcessing($"");
-
-        // Convert arguments to array, handling quoted strings properly
-        var argList = ParseArgumentsForWsl(arguments, wslInfo);
 
         using var process = wslInfo != null
             ? ToolchainServiceExtensions.RunCargoInWsl(wslInfo, argList, linuxWorkingDir, ct)

@@ -65,10 +65,16 @@ public static class TemporaryTargetSystemStore
                 if (p != null)
                 {
                     var stdout = p.StandardOutput.ReadToEnd();
+                    // wsl.exe output can contain embedded NULs on some systems when redirected.
+                    if (!string.IsNullOrEmpty(stdout) && stdout.IndexOf('\0') >= 0)
+                    {
+                        stdout = stdout.Replace("\0", string.Empty);
+                    }
+
                     p.WaitForExit(2000);
                     var distros = stdout
                         .Split(new[] { "\r\n", "\n" }, StringSplitOptions.RemoveEmptyEntries)
-                        .Select(s => s.Trim())
+                        .Select(s => (s?.IndexOf('\0') >= 0 ? s.Replace("\0", string.Empty) : s).Trim())
                         .Where(s => !string.IsNullOrWhiteSpace(s))
                         .Distinct(StringComparer.OrdinalIgnoreCase)
                         .OrderBy(s => s, StringComparer.OrdinalIgnoreCase);
@@ -85,7 +91,8 @@ public static class TemporaryTargetSystemStore
             _lastRefreshUtc = now;
 
             // Ensure current selection is valid.
-            if (string.IsNullOrWhiteSpace(CurrentTargetSystem) || !_cachedTargetSystems.Contains(CurrentTargetSystem))
+            if (string.IsNullOrWhiteSpace(CurrentTargetSystem) ||
+                !_cachedTargetSystems.Contains(CurrentTargetSystem, StringComparer.OrdinalIgnoreCase))
             {
                 CurrentTargetSystem = _cachedTargetSystems[0];
             }
@@ -123,7 +130,13 @@ public sealed class TargetSystemComboCommand : BaseRustAnalyzerCommand<TargetSys
             // (We keep this process-scoped to avoid impacting other VS instances.)
             if (TemporaryTargetSystemStore.CurrentTargetSystem.StartsWith("WSL:", StringComparison.OrdinalIgnoreCase))
             {
-                var distro = TemporaryTargetSystemStore.CurrentTargetSystem.Substring("WSL:".Length).Trim();
+                var distro = TemporaryTargetSystemStore.CurrentTargetSystem.Substring("WSL:".Length);
+                if (!string.IsNullOrEmpty(distro) && distro.IndexOf('\0') >= 0)
+                {
+                    distro = distro.Replace("\0", string.Empty);
+                }
+
+                distro = distro.Trim();
                 ApplyProcessTargetSystem("wsl", distro);
                 PersistWorkspaceTargetSystem("wsl", distro);
             }

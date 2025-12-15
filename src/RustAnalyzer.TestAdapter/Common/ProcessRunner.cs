@@ -595,7 +595,17 @@ public sealed class ProcessRunner : IDisposable
         }
         else if (!string.IsNullOrEmpty(e.Data))
         {
-            foreach (var line in SplitLines(e.Data))
+            // Some Windows tools (notably wsl.exe in some builds) can emit UTF-16LE without a BOM when output is redirected,
+            // which can surface as embedded NULs in the decoded string. Strip them so we don't:
+            // - display one character per line in the Output Window, and
+            // - corrupt values such as distro names.
+            var data = e.Data;
+            if (data.IndexOf('\0') >= 0)
+            {
+                data = data.Replace("\0", string.Empty);
+            }
+
+            foreach (var line in SplitLines(data))
             {
                 if (_output != null)
                 {
@@ -638,7 +648,14 @@ public sealed class ProcessRunner : IDisposable
         }
         else if (!string.IsNullOrEmpty(e.Data))
         {
-            foreach (var line in SplitLines(e.Data))
+            // See note in OnOutputDataReceived: strip embedded NULs from redirected output.
+            var data = e.Data;
+            if (data.IndexOf('\0') >= 0)
+            {
+                data = data.Replace("\0", string.Empty);
+            }
+
+            foreach (var line in SplitLines(data))
             {
                 if (_error != null)
                 {

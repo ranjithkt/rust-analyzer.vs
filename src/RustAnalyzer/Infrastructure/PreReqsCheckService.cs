@@ -184,6 +184,11 @@ public sealed class PreReqsCheckService : IPreReqsCheckService
             using var proc = ProcessRunner.Run(wslExePath, wslArgs, Environment.SystemDirectory, ImmutableDictionary<string, string>.Empty, cts.Token);
             var ec = await proc;
 
+            if (ec != 0 && IsWslDistroNotFound(proc))
+            {
+                return (false, $"WSL distro '{distroName}' was not found. Run 'wsl -l -q' to see installed distributions.");
+            }
+
             if (ec == 0 && proc.StandardOutputLines.Any())
             {
                 return (true, string.Empty);
@@ -214,6 +219,11 @@ public sealed class PreReqsCheckService : IPreReqsCheckService
             cts.CancelAfter(WslPrereqTimeout);
             using var proc = ProcessRunner.Run(wslExePath, wslArgs, Environment.SystemDirectory, ImmutableDictionary<string, string>.Empty, cts.Token);
             var ec = await proc;
+
+            if (ec != 0 && IsWslDistroNotFound(proc))
+            {
+                return (false, $"WSL distro '{distroName}' was not found. Run 'wsl -l -q' to see installed distributions.");
+            }
 
             if (ec == 0 && proc.StandardOutputLines.Any())
             {
@@ -297,6 +307,25 @@ public sealed class PreReqsCheckService : IPreReqsCheckService
         }
 
         Debug.WriteLine($"[{Vsix.Name}] PreReqsCheck '{check}' threw: {e}");
+    }
+
+    private static bool IsWslDistroNotFound(ProcessRunner proc)
+    {
+        try
+        {
+            var combined = string.Join("\n", proc.StandardOutputLines.Concat(proc.StandardErrorLines));
+            if (string.IsNullOrEmpty(combined))
+            {
+                return false;
+            }
+
+            return combined.IndexOf("WSL_E_DISTRO_NOT_FOUND", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                   combined.IndexOf("There is no distribution with the supplied name", StringComparison.OrdinalIgnoreCase) >= 0;
+        }
+        catch
+        {
+            return false;
+        }
     }
 
     private static async Task<(bool Success, string Message)> CheckRustupToolchainInstallationAsync(IToolchainService ts, CancellationToken ct)

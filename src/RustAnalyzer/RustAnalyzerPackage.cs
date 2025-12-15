@@ -181,11 +181,17 @@ public sealed class RustAnalyzerPackage : ToolkitPackage
 
             // Best-effort timeout (avoid hanging package load).
             var stdout = await p.StandardOutput.ReadToEndAsync();
+            // wsl.exe output can contain embedded NULs on some systems when redirected.
+            if (!string.IsNullOrEmpty(stdout) && stdout.IndexOf('\0') >= 0)
+            {
+                stdout = stdout.Replace("\0", string.Empty);
+            }
+
             await Task.Run(() => p.WaitForExit(2000), ct);
 
             var distros = stdout
                 .Split(new[] { "\r\n", "\n" }, StringSplitOptions.RemoveEmptyEntries)
-                .Select(s => s.Trim());
+                .Select(s => (s?.IndexOf('\0') >= 0 ? s.Replace("\0", string.Empty) : s).Trim());
 
             return distros.Any(d => string.Equals(d, distroName, StringComparison.OrdinalIgnoreCase));
         }
