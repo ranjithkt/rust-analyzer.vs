@@ -166,9 +166,7 @@ public sealed class DebugLaunchTargetProvider : ILaunchDebugTargetProvider
     {
         // Convert Windows UNC paths to Linux paths for WSL debugging
         var linuxExePath = wslInfo.ToLinuxPath(processName);
-        var linuxWorkingDir = workingDirectory.IsNullOrEmpty()
-            ? wslInfo.ToLinuxPath(processName.GetDirectoryName())
-            : (WslInfo.IsWslPath(workingDirectory) ? wslInfo.ToLinuxPath(workingDirectory) : workingDirectory);
+        var linuxWorkingDir = ResolveLinuxWorkingDirectory(workingDirectory, package.Parent.WorkspaceRoot, processName, wslInfo);
 
         // For WSL debugging, we use the SSH:wsl+<distro> port name
         // This tells VS to use the WSL debugging transport
@@ -194,6 +192,46 @@ public sealed class DebugLaunchTargetProvider : ILaunchDebugTargetProvider
             fSendStdoutToOutputWindow = 0,
             clsidCustom = DebugEnginesGuids.NativeOnly_guid,
         };
+    }
+
+    private static string ResolveLinuxWorkingDirectory(string workingDirectorySetting, PathEx workspaceRoot, PathEx exePath, WslInfo wslInfo)
+    {
+        // Default: directory of the exe
+        var fallback = wslInfo.ToLinuxPath(exePath.GetDirectoryName());
+
+        if (workingDirectorySetting.IsNullOrEmpty())
+        {
+            return fallback;
+        }
+
+        // If user already provided a Linux absolute path, keep it.
+        if (workingDirectorySetting.StartsWith("/"))
+        {
+            return workingDirectorySetting;
+        }
+
+        // If user provided a WSL UNC path, convert it.
+        if (WslInfo.IsWslPath(workingDirectorySetting))
+        {
+            return wslInfo.ToLinuxPath(workingDirectorySetting);
+        }
+
+        // If user provided a Windows-rooted path (e.g. C:\...), we cannot reliably map it to WSL.
+        // Fall back to the exe directory to avoid passing an invalid Linux cwd to the debugger.
+        if (Path.IsPathRooted(workingDirectorySetting))
+        {
+            return fallback;
+        }
+
+        // Otherwise treat it as a relative path under the workspace root.
+        // This preserves the common “target/debug” style values.
+        var combined = workspaceRoot + (PathEx)workingDirectorySetting;
+        if (WslInfo.IsWslPath(combined))
+        {
+            return wslInfo.ToLinuxPath(combined);
+        }
+
+        return fallback;
     }
 
     private Task<string> GetSettingsAsync(string type, ISettingsService settingsService, LaunchConfigWrapper lcw)

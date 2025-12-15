@@ -314,12 +314,29 @@ public static class ToolchainServiceExtensions
         }
 
         wslArgs.Add("--exec");
+
+        // NOTE: Setting env vars for the *Linux* process via Windows env is unreliable and
+        // can require WSLENV. For predictable behavior, when env overrides are provided we
+        // execute /usr/bin/env and pass KEY=VALUE pairs explicitly.
+        if (env != null && env.Any())
+        {
+            wslArgs.Add("env");
+            foreach (var kv in env.Where(kv => !string.IsNullOrWhiteSpace(kv.Key)))
+            {
+                // If values contain whitespace this won't work without a shell; keep it minimal.
+                wslArgs.Add($"{kv.Key}={kv.Value ?? string.Empty}");
+            }
+        }
+
         wslArgs.Add(command);
-        wslArgs.AddRange(args);
+        if (args != null && args.Length > 0)
+        {
+            wslArgs.AddRange(args);
+        }
 
         // NOTE: ProcessStartInfo.WorkingDirectory must be a valid Windows directory.
         // wsl.exe handles the Linux-side cwd via --cd, but we still set a safe Windows cwd here.
-        return ProcessRunner.Run(wslExePath, wslArgs.ToArray(), Environment.SystemDirectory, env ?? ImmutableDictionary<string, string>.Empty, ct);
+        return ProcessRunner.Run(wslExePath, wslArgs.ToArray(), Environment.SystemDirectory, ImmutableDictionary<string, string>.Empty, ct);
     }
 
     /// <summary>

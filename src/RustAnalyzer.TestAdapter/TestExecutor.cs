@@ -80,6 +80,9 @@ public class TestExecutor : BaseTestExecutor, ITestExecutor
         try
         {
             var envDict = trp.TestExecutionEnvironment.OverrideProcessEnvironment();
+
+            // For WSL we must not pass the full Windows process environment; only pass explicit overrides.
+            var envWsl = trp.TestExecutionEnvironment.ToNullSeparatedDictionary();
             var testCasesMap = testCases.ToImmutableDictionary(x => x.FullyQualifiedNameRustFormat());
             var args = testCases.Select(tc => tc.FullyQualifiedNameRustFormat());
             var grps = args
@@ -90,7 +93,7 @@ public class TestExecutor : BaseTestExecutor, ITestExecutor
                         .Concat(trp.AdditionalTestExecutionArguments.FromNullSeparatedArray()));
             Parallel.Invoke(
                 grps
-                    .Select(args => RunTestsFromOneExe(exe, args.ToArray(), testCasesMap, envDict, tl, isBeingDebugged, fh, ct))
+                    .Select(args => RunTestsFromOneExe(exe, args.ToArray(), testCasesMap, envDict, envWsl, tl, isBeingDebugged, fh, ct))
                     .Select(t => (Action)(() => t.Wait()))
                     .ToArray());
         }
@@ -102,7 +105,16 @@ public class TestExecutor : BaseTestExecutor, ITestExecutor
         }
     }
 
-    private static async Task RunTestsFromOneExe(PathEx exe, string[] args, IReadOnlyDictionary<string, TestCase> testCasesMap, IDictionary<string, string> envDict, TL tl, bool isBeingDebugged, IFrameworkHandle fh, CancellationToken ct)
+    private static async Task RunTestsFromOneExe(
+        PathEx exe,
+        string[] args,
+        IReadOnlyDictionary<string, TestCase> testCasesMap,
+        IDictionary<string, string> envDict,
+        IDictionary<string, string> envWsl,
+        TL tl,
+        bool isBeingDebugged,
+        IFrameworkHandle fh,
+        CancellationToken ct)
     {
         // Check if this is a WSL test executable
         var isWsl = WslInfo.TryParse(exe, out var wslInfo);
@@ -130,7 +142,7 @@ public class TestExecutor : BaseTestExecutor, ITestExecutor
                 wslArgs.AddRange(args);
 
                 // Use System32 as the Windows working directory for wsl.exe (consistent with RunInWsl)
-                var rc = fh.LaunchProcessWithDebuggerAttached(wslExePath, Environment.SystemDirectory, string.Join(" ", wslArgs), envDict);
+                var rc = fh.LaunchProcessWithDebuggerAttached(wslExePath, Environment.SystemDirectory, string.Join(" ", wslArgs), envWsl);
                 if (rc != 0)
                 {
                     tl.L.WriteError("RunTestsFromOneSourceAsync launching WSL test under debugger - returned {0}.", rc);
@@ -154,7 +166,7 @@ public class TestExecutor : BaseTestExecutor, ITestExecutor
                 // Run test executable via WSL
                 var linuxExe = wslInfo.ToLinuxPath(exe);
                 var linuxWorkingDir = wslInfo.ToLinuxPath(exe.GetDirectoryName());
-                testExeProc = ToolchainServiceExtensions.RunInWsl(wslInfo, linuxExe, args, linuxWorkingDir, envDict, ct);
+                testExeProc = ToolchainServiceExtensions.RunInWsl(wslInfo, linuxExe, args, linuxWorkingDir, envWsl, ct);
             }
             else
             {
