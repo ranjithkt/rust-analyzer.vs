@@ -274,16 +274,13 @@ public static class ToolchainServiceExtensions
 
         var toolName = OpNameToToolNameMapper[opName];
         var linuxWorkingDir = wslInfo.ToLinuxPath(workingDirectory);
-        var wslExePath = WslInfo.GetWslExePath();
 
-        // Build wsl.exe arguments: -d <distro> --cd <dir> --exec <command> <args...>
-        // IMPORTANT: do not use naive string.Split(' ') because args can contain quoted values.
+        // IMPORTANT:
+        // Direct `wsl.exe --exec cargo ...` can fail on some setups because the non-interactive PATH
+        // does not include ~/.cargo/bin (rustup installs cargo there).
+        // Run through /bin/bash -lc when needed (handled by RunInWsl).
         var splitArgs = SplitCommandLineArgs(args);
-        var wslArgs = new[] { "-d", wslInfo.DistroName, "--cd", linuxWorkingDir, "--exec", toolName }
-            .Concat(splitArgs)
-            .ToArray();
-
-        using var proc = ProcessRunner.Run(wslExePath, wslArgs, Environment.SystemDirectory, ImmutableDictionary<string, string>.Empty, ct);
+        using var proc = RunInWsl(wslInfo, toolName, splitArgs.ToArray(), linuxWorkingDir, env: null, ct);
 
         var ec = await proc;
         var output = proc.StandardOutputLines.Concat(proc.StandardErrorLines).ToArray();
@@ -315,23 +312,25 @@ public static class ToolchainServiceExtensions
 
         wslArgs.Add("--exec");
 
-        // NOTE: Setting env vars for the *Linux* process via Windows env is unreliable and
-        // can require WSLENV. For predictable behavior, when env overrides are provided we
-        // execute /usr/bin/env and pass KEY=VALUE pairs explicitly.
-        if (env != null && env.Any())
+        // NOTE:
+        // On some systems `wsl.exe --exec cargo ...` fails because PATH is minimal and doesn't include ~/.cargo/bin.
+        // Also, passing env vars to the Linux process via Windows env is unreliable and can require WSLENV.
+        // So, when the command is not an absolute Linux path OR env overrides are provided, run via:
+        //   /bin/bash -lc "env KEY='VALUE' ... command 'arg1' ..."
+        var needsShell = (env != null && env.Any()) || !WslInfo.IsLinuxAbsolutePath(command);
+        if (needsShell)
         {
-            wslArgs.Add("env");
-            foreach (var kv in env.Where(kv => !string.IsNullOrWhiteSpace(kv.Key)))
-            {
-                // If values contain whitespace this won't work without a shell; keep it minimal.
-                wslArgs.Add($"{kv.Key}={kv.Value ?? string.Empty}");
-            }
+            wslArgs.Add("/bin/bash");
+            wslArgs.Add("-lc");
+            wslArgs.Add(BuildBashCommand(command, args, env));
         }
-
-        wslArgs.Add(command);
-        if (args != null && args.Length > 0)
+        else
         {
-            wslArgs.AddRange(args);
+            wslArgs.Add(command);
+            if (args != null && args.Length > 0)
+            {
+                wslArgs.AddRange(args);
+            }
         }
 
         // NOTE: ProcessStartInfo.WorkingDirectory must be a valid Windows directory.
@@ -356,11 +355,8 @@ public static class ToolchainServiceExtensions
 
         var linuxWorkingDir = wslInfo.ToLinuxPath(workingDirectory);
 
-        // Get sysroot from rustc inside WSL
-        var wslExePath = WslInfo.GetWslExePath();
-        var wslArgs = new[] { "-d", wslInfo.DistroName, "--cd", linuxWorkingDir, "--exec", "rustc", "--print", "sysroot" };
-
-        using var proc = ProcessRunner.Run(wslExePath, wslArgs, Environment.SystemDirectory, ImmutableDictionary<string, string>.Empty, ct);
+        // Get sysroot from rustc inside WSL (run via RunInWsl to ensure rustc is discoverable)
+        using var proc = RunInWsl(wslInfo, "rustc", new[] { "--print", "sysroot" }, linuxWorkingDir, env: null, ct);
         var ec = await proc;
 
         if (ec != 0 || !proc.StandardOutputLines.Any())
@@ -375,8 +371,7 @@ public static class ToolchainServiceExtensions
         var bin = $"{sysroot}/bin";
 
         // Get the target triple
-        var tripleArgs = new[] { "-d", wslInfo.DistroName, "--cd", linuxWorkingDir, "--exec", "rustc", "-vV" };
-        using var tripleProc = ProcessRunner.Run(wslExePath, tripleArgs, Environment.SystemDirectory, ImmutableDictionary<string, string>.Empty, ct);
+        using var tripleProc = RunInWsl(wslInfo, "rustc", new[] { "-vV" }, linuxWorkingDir, env: null, ct);
         var tripleEc = await tripleProc;
 
         var targetTriple = "x86_64-unknown-linux-gnu"; // Default fallback
@@ -392,6 +387,31 @@ public static class ToolchainServiceExtensions
         var lib = $"{sysroot}/lib/rustlib/{targetTriple}/lib";
 
         return (bin, lib);
+    }
+
+    public static async Task<string> GetCommandOutputSingleLine(string opName, string versionArgs, PathEx workingDirectory, CancellationToken ct)
+    {
+        var lines = await GetCommandOutput(opName, versionArgs, workingDirectory, ct);
+
+        return string.Join(string.Empty, lines.Where(l => !l.IsNullOrEmptyOrWhiteSpace()));
+    }
+
+    public static Task<bool> InstallToolchain(string commandline, IBuildOutputSink bos, CancellationToken ct)
+    {
+        bos.Clear();
+
+        var rustupPath = GetRustupPath();
+        return rustupPath.RunAsync(
+            commandline,
+            rustupPath.GetPathRoot(),
+            new BuildOutputRedirector(
+                bos,
+                rustupPath.GetFileName(),
+                _ => Task.CompletedTask,
+                x => new[] { new StringBuildMessage { Message = x } }),
+            $"==== {rustupPath.GetFileName()} done. ====\n",
+            $"==== {rustupPath.GetFileName()} cancelled.====\n",
+            ct);
     }
 
     /// <summary>
@@ -425,6 +445,7 @@ public static class ToolchainServiceExtensions
                     result.Add(current.ToString());
                     current.Clear();
                 }
+
                 continue;
             }
 
@@ -439,29 +460,38 @@ public static class ToolchainServiceExtensions
         return result;
     }
 
-    public static async Task<string> GetCommandOutputSingleLine(string opName, string versionArgs, PathEx workingDirectory, CancellationToken ct)
+    private static string BuildBashCommand(string command, string[] args, IDictionary<string, string> env)
     {
-        var lines = await GetCommandOutput(opName, versionArgs, workingDirectory, ct);
+        var parts = new List<string>();
 
-        return string.Join(string.Empty, lines.Where(l => !l.IsNullOrEmptyOrWhiteSpace()));
+        if (env != null && env.Any())
+        {
+            parts.Add("env");
+            foreach (var kv in env.Where(kv => !string.IsNullOrWhiteSpace(kv.Key)))
+            {
+                parts.Add($"{kv.Key}={QuoteForPosixShell(kv.Value ?? string.Empty)}");
+            }
+        }
+
+        parts.Add(QuoteForPosixShell(command));
+        if (args != null && args.Length > 0)
+        {
+            parts.AddRange(args.Where(a => a != null).Select(QuoteForPosixShell));
+        }
+
+        return string.Join(" ", parts);
     }
 
-    public static Task<bool> InstallToolchain(string commandline, IBuildOutputSink bos, CancellationToken ct)
+    private static string QuoteForPosixShell(string arg)
     {
-        bos.Clear();
+        // Single-quote for POSIX shells, escaping embedded single quotes.
+        // foo'bar => 'foo'"'"'bar'
+        if (arg == null)
+        {
+            return "''";
+        }
 
-        var rustupPath = GetRustupPath();
-        return rustupPath.RunAsync(
-            commandline,
-            rustupPath.GetPathRoot(),
-            new BuildOutputRedirector(
-                bos,
-                rustupPath.GetFileName(),
-                _ => Task.CompletedTask,
-                x => new[] { new StringBuildMessage { Message = x } }),
-            $"==== {rustupPath.GetFileName()} done. ====\n",
-            $"==== {rustupPath.GetFileName()} cancelled.====\n",
-            ct);
+        return "'" + arg.Replace("'", "'\"'\"'") + "'";
     }
 }
 

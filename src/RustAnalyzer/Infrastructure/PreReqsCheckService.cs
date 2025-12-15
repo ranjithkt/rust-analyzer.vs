@@ -170,7 +170,9 @@ public sealed class PreReqsCheckService : IPreReqsCheckService
         try
         {
             var wslExePath = WslInfo.GetWslExePath();
-            var wslArgs = new[] { "-d", wslInfo.DistroName, "--exec", Constants.WslCargoExe, "--version" };
+            // Direct `wsl.exe --exec cargo` can fail if PATH doesn't include ~/.cargo/bin.
+            // Run via a login shell so rustup-installed cargo is discoverable.
+            var wslArgs = new[] { "-d", wslInfo.DistroName, "--exec", "/bin/bash", "-lc", "cargo --version" };
 
             using var proc = ProcessRunner.Run(wslExePath, wslArgs, Environment.SystemDirectory, ImmutableDictionary<string, string>.Empty, ct);
             var ec = await proc;
@@ -192,7 +194,8 @@ public sealed class PreReqsCheckService : IPreReqsCheckService
         try
         {
             var wslExePath = WslInfo.GetWslExePath();
-            var wslArgs = new[] { "-d", wslInfo.DistroName, "--exec", Constants.WslRustUpExe, "--version" };
+            // Same PATH caveat as cargo; use a login shell.
+            var wslArgs = new[] { "-d", wslInfo.DistroName, "--exec", "/bin/bash", "-lc", "rustup --version" };
 
             using var proc = ProcessRunner.Run(wslExePath, wslArgs, Environment.SystemDirectory, ImmutableDictionary<string, string>.Empty, ct);
             var ec = await proc;
