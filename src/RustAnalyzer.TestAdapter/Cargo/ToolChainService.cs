@@ -3,7 +3,6 @@ using System.Collections.Generic;
 using System.Collections.Immutable;
 using System.Collections.ObjectModel;
 using System.ComponentModel.Composition;
-using System.IO;
 using System.Linq;
 using System.Text.RegularExpressions;
 using System.Threading;
@@ -639,6 +638,15 @@ public sealed class ToolchainService : IToolchainService
         if (arg.StartsWith(wslInfo.UncDistroRoot, StringComparison.OrdinalIgnoreCase))
         {
             return wslInfo.ToLinuxPath(arg);
+        }
+
+        // Handle common patterns like --foo=\\wsl.localhost\Distro\path or -C=\\wsl$...
+        var idx = arg.IndexOf(wslInfo.UncDistroRoot, StringComparison.OrdinalIgnoreCase);
+        if (idx >= 0)
+        {
+            var prefix = arg.Substring(0, idx);
+            var uncPath = arg.Substring(idx);
+            return prefix + wslInfo.ToLinuxPath(uncPath);
         }
 
         return arg;
