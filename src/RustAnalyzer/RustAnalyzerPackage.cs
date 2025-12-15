@@ -19,6 +19,7 @@ using Microsoft.VisualStudio.Workspace.VSIntegration.Contracts;
 using CommunityVS = Community.VisualStudio.Toolkit.VS;
 using Constants = KS.RustAnalyzer.TestAdapter.Constants;
 using KS.RustAnalyzer.Shell;
+using KS.RustAnalyzer.TestAdapter.Common;
 
 namespace KS.RustAnalyzer;
 
@@ -114,7 +115,9 @@ public sealed class RustAnalyzerPackage : ToolkitPackage
                         var mode = await ss.GetAsync(SettingsInfo.TypeTargetSystem, (PathEx)workspaceRoot);
                         var distro = await ss.GetAsync(SettingsInfo.TypeWslDistroName, (PathEx)workspaceRoot);
 
-                        if (string.Equals(mode, "wsl", StringComparison.OrdinalIgnoreCase) && !string.IsNullOrWhiteSpace(distro))
+                        if (string.Equals(mode, "wsl", StringComparison.OrdinalIgnoreCase) &&
+                            !string.IsNullOrWhiteSpace(distro) &&
+                            await IsWslDistroInstalledAsync(distro.Trim(), cancellationToken))
                         {
                             Environment.SetEnvironmentVariable(Constants.RAVsTargetSystem, "wsl", EnvironmentVariableTarget.Process);
                             Environment.SetEnvironmentVariable(Constants.RAVsWslDistroName, distro.Trim(), EnvironmentVariableTarget.Process);
@@ -148,6 +151,48 @@ public sealed class RustAnalyzerPackage : ToolkitPackage
 
         await _raDownloader.InstallLatestAsync();
         await RlsUpdatedNotification.ShowAsync();
+    }
+
+    private static async Task<bool> IsWslDistroInstalledAsync(string distroName, CancellationToken ct)
+    {
+        try
+        {
+            if (string.IsNullOrWhiteSpace(distroName) || !WslInfo.IsWslAvailable())
+            {
+                return false;
+            }
+
+            var psi = new ProcessStartInfo
+            {
+                FileName = WslInfo.GetWslExePath(),
+                Arguments = "-l -q",
+                WorkingDirectory = Environment.SystemDirectory,
+                UseShellExecute = false,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                CreateNoWindow = true,
+            };
+
+            using var p = Process.Start(psi);
+            if (p == null)
+            {
+                return false;
+            }
+
+            // Best-effort timeout (avoid hanging package load).
+            var stdout = await p.StandardOutput.ReadToEndAsync();
+            await Task.Run(() => p.WaitForExit(2000), ct);
+
+            var distros = stdout
+                .Split(new[] { "\r\n", "\n" }, StringSplitOptions.RemoveEmptyEntries)
+                .Select(s => s.Trim());
+
+            return distros.Any(d => string.Equals(d, distroName, StringComparison.OrdinalIgnoreCase));
+        }
+        catch
+        {
+            return false;
+        }
     }
 
     #region Handling incompatible extensions

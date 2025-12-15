@@ -6,6 +6,7 @@ using System.Linq;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
+using System.Diagnostics;
 using KS.RustAnalyzer.TestAdapter.Cargo;
 using KS.RustAnalyzer.TestAdapter.Common;
 using Microsoft.VisualStudio.Shell;
@@ -29,6 +30,8 @@ public interface IPreReqsCheckService
 [PartCreationPolicy(CreationPolicy.Shared)]
 public sealed class PreReqsCheckService : IPreReqsCheckService
 {
+    private static readonly TimeSpan WslPrereqTimeout = TimeSpan.FromSeconds(5);
+
     private readonly IToolchainService _cargoService;
     private readonly TL _tl;
 
@@ -159,8 +162,9 @@ public sealed class PreReqsCheckService : IPreReqsCheckService
                 return await (true, string.Empty).ToTask();
             }
         }
-        catch
+        catch (Exception e)
         {
+            TryLogPrereqException("CheckWslExeAsync", e);
         }
 
         return (false, "wsl.exe not found. Please ensure WSL is installed.");
@@ -175,7 +179,9 @@ public sealed class PreReqsCheckService : IPreReqsCheckService
             // Run via a login shell so rustup-installed cargo is discoverable.
             var wslArgs = new[] { "-d", distroName, "--exec", "/bin/bash", "-lc", "cargo --version" };
 
-            using var proc = ProcessRunner.Run(wslExePath, wslArgs, Environment.SystemDirectory, ImmutableDictionary<string, string>.Empty, ct);
+            using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            cts.CancelAfter(WslPrereqTimeout);
+            using var proc = ProcessRunner.Run(wslExePath, wslArgs, Environment.SystemDirectory, ImmutableDictionary<string, string>.Empty, cts.Token);
             var ec = await proc;
 
             if (ec == 0 && proc.StandardOutputLines.Any())
@@ -183,8 +189,14 @@ public sealed class PreReqsCheckService : IPreReqsCheckService
                 return (true, string.Empty);
             }
         }
-        catch
+        catch (OperationCanceledException e)
         {
+            TryLogPrereqException("CheckCargoInWslAsync(timeout)", e);
+            return (false, $"Timed out while checking cargo in WSL distro '{distroName}'.");
+        }
+        catch (Exception e)
+        {
+            TryLogPrereqException("CheckCargoInWslAsync", e);
         }
 
         return (false, $"cargo not found in WSL distro '{distroName}'. Please install Rust toolchain inside WSL.");
@@ -198,7 +210,9 @@ public sealed class PreReqsCheckService : IPreReqsCheckService
             // Same PATH caveat as cargo; use a login shell.
             var wslArgs = new[] { "-d", distroName, "--exec", "/bin/bash", "-lc", "rustup --version" };
 
-            using var proc = ProcessRunner.Run(wslExePath, wslArgs, Environment.SystemDirectory, ImmutableDictionary<string, string>.Empty, ct);
+            using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            cts.CancelAfter(WslPrereqTimeout);
+            using var proc = ProcessRunner.Run(wslExePath, wslArgs, Environment.SystemDirectory, ImmutableDictionary<string, string>.Empty, cts.Token);
             var ec = await proc;
 
             if (ec == 0 && proc.StandardOutputLines.Any())
@@ -206,8 +220,14 @@ public sealed class PreReqsCheckService : IPreReqsCheckService
                 return (true, string.Empty);
             }
         }
-        catch
+        catch (OperationCanceledException e)
         {
+            TryLogPrereqException("CheckRustupInWslAsync(timeout)", e);
+            return (false, $"Timed out while checking rustup in WSL distro '{distroName}'.");
+        }
+        catch (Exception e)
+        {
+            TryLogPrereqException("CheckRustupInWslAsync", e);
         }
 
         return (false, $"rustup not found in WSL distro '{distroName}'. Please install rustup inside WSL.");
@@ -240,8 +260,9 @@ public sealed class PreReqsCheckService : IPreReqsCheckService
                 return await (true, string.Empty).ToTask();
             }
         }
-        catch
+        catch (Exception e)
         {
+            TryLogPrereqException("CheckCargoAsync", e);
         }
 
         return (false, $"{Constants.CargoExe} component is not found in any active toolchain.");
@@ -256,11 +277,26 @@ public sealed class PreReqsCheckService : IPreReqsCheckService
                 return await (true, string.Empty).ToTask();
             }
         }
-        catch
+        catch (Exception e)
         {
+            TryLogPrereqException("CheckRustupAsync", e);
         }
 
         return (false, $"{Constants.RustUpExe} not installed.");
+    }
+
+    private static void TryLogPrereqException(string check, Exception e)
+    {
+        try
+        {
+            ActivityLog.LogInformation(Vsix.Name, $"PreReqsCheck '{check}' threw: {e.GetType().Name}: {e.Message}");
+        }
+        catch
+        {
+            // Best-effort only.
+        }
+
+        Debug.WriteLine($"[{Vsix.Name}] PreReqsCheck '{check}' threw: {e}");
     }
 
     private static async Task<(bool Success, string Message)> CheckRustupToolchainInstallationAsync(IToolchainService ts, CancellationToken ct)

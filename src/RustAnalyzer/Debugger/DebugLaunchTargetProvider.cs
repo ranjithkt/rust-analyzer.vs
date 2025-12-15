@@ -19,8 +19,12 @@ using static Microsoft.VisualStudio.VSConstants;
 namespace KS.RustAnalyzer.Debugger;
 
 // TODO: Workaround for https://github.com/kitamstudios/rust-analyzer.vs/issues/24. Just implementing LaunchDebugTargetProviderOptions.IsRuntimeSupportContext should be enough but it does not work, for now setting priority to low.
-// NOTE: WSL binaries are typically extensionless, so we register for both ".exe" (Windows) and "" (no extension).
-[ExportLaunchDebugTarget(LaunchDebugTargetProviderOptions.IsRuntimeSupportContext, ProviderType, new[] { ".exe", "" }, ProviderPriority.Lowest)]
+// NOTE:
+// - Windows binaries are typically ".exe".
+// - WSL/Linux binaries are typically extensionless.
+// Some VS builds appear to not consistently route extensionless binaries via an empty-string extension filter,
+// so we register broadly and do strict filtering in SupportsContext.
+[ExportLaunchDebugTarget(LaunchDebugTargetProviderOptions.IsRuntimeSupportContext, ProviderType, new[] { "*" }, ProviderPriority.Lowest)]
 public sealed class DebugLaunchTargetProvider : ILaunchDebugTargetProvider
 {
     public const string ProviderType = "{72D3FCEF-1111-4266-B8DD-D3ED06E35A2B}";
@@ -40,10 +44,64 @@ public sealed class DebugLaunchTargetProvider : ILaunchDebugTargetProvider
 
     public bool SupportsContext(IWorkspace workspaceContext, string targetFilePath)
     {
-        var mds = workspaceContext.GetService<IMetadataService>();
-        var package = workspaceContext.JTF.Run(async () => await workspaceContext.GetService<IMetadataService>()?.GetContainingPackageAsync((PathEx)targetFilePath, default));
+        try
+        {
+            if (workspaceContext == null || string.IsNullOrWhiteSpace(targetFilePath))
+            {
+                return false;
+            }
 
-        return package != null;
+            // Only handle build outputs under "target\..." to avoid stealing unrelated debug launches.
+            // (On WSL UNC and Windows-local paths, VS still passes backslash-separated paths to us.)
+            if (targetFilePath.IndexOf(@"\target\", StringComparison.OrdinalIgnoreCase) < 0)
+            {
+                return false;
+            }
+
+            var mds = workspaceContext.GetService<IMetadataService>();
+            if (mds == null)
+            {
+                return false;
+            }
+
+            // Prefer cached packages to avoid expensive metadata loads, but fall back to loading.
+            var packages = workspaceContext.JTF.Run(async () => (await mds.GetCachedPackagesAsync(default))?.ToArray() ?? Array.Empty<Workspace.Package>());
+            if (packages.Length == 0)
+            {
+                var containing = workspaceContext.JTF.Run(async () => await mds.GetContainingPackageAsync((PathEx)targetFilePath, default));
+                return containing != null && MatchesRunnableTarget(containing, targetFilePath);
+            }
+
+            return packages.Any(p => MatchesRunnableTarget(p, targetFilePath));
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private static bool MatchesRunnableTarget(Workspace.Package package, string targetFilePath)
+    {
+        try
+        {
+            var fp = ((PathEx)targetFilePath).GetFullPath();
+            foreach (var target in package.GetTargets().Where(t => t.IsRunnable))
+            {
+                foreach (var profile in package.GetProfiles())
+                {
+                    if (target.GetPath(profile).GetFullPath() == fp)
+                    {
+                        return true;
+                    }
+                }
+            }
+        }
+        catch
+        {
+            // Ignore and treat as no-match.
+        }
+
+        return false;
     }
 
     private async Task LaunchDebugTargetAsync(IWorkspace workspaceContext, IServiceProvider serviceProvider, LaunchConfigWrapper lcw, CancellationToken ct)

@@ -10,7 +10,8 @@ namespace KS.RustAnalyzer.TestAdapter.Common;
 public static class WslPathMapper
 {
     private static readonly Regex WindowsDrivePath = new(@"^(?<drive>[a-zA-Z]):[\\/](?<rest>.*)$", RegexOptions.Compiled);
-    private static readonly Regex WslMntPath = new(@"^/mnt/(?<drive>[a-zA-Z])/(?<rest>.*)$", RegexOptions.Compiled);
+    // Support "/mnt/c", "/mnt/c/", and "/mnt/c/foo/bar"
+    private static readonly Regex WslMntPath = new(@"^/mnt/(?<drive>[a-zA-Z])(?:/(?<rest>.*))?$", RegexOptions.Compiled);
 
     public static bool TryWindowsToWslPath(string windowsPath, out string linuxPath)
     {
@@ -70,8 +71,9 @@ public static class WslPathMapper
         }
 
         var drive = char.ToUpperInvariant(m.Groups["drive"].Value[0]);
-        var rest = m.Groups["rest"].Value.Replace('/', '\\');
-        windowsPath = $"{drive}:\\{rest}";
+        var restGroup = m.Groups["rest"];
+        var rest = restGroup.Success ? restGroup.Value.Replace('/', '\\') : string.Empty;
+        windowsPath = string.IsNullOrEmpty(rest) ? $"{drive}:\\" : $"{drive}:\\{rest}";
         return true;
     }
 

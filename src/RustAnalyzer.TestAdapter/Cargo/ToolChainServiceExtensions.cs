@@ -253,6 +253,14 @@ public static class ToolchainServiceExtensions
             return await GetCommandOutputWsl(opName, args, workingDirectory, wslInfo, distroName, ct);
         }
 
+        // Safety: if this looks like a WSL UNC path but parsing failed, don't fall back to Windows tools.
+        // This avoids confusing "cargo.exe not found" failures later.
+        var wd = (string)workingDirectory;
+        if (!string.IsNullOrEmpty(wd) && wd.StartsWith(@"\\wsl", StringComparison.OrdinalIgnoreCase))
+        {
+            return new[] { $"WSL path detected but distro could not be parsed from '{wd}'. Please re-open the folder under a valid WSL UNC path (\\\\wsl.localhost\\<distro>\\...) or select a WSL Target System." };
+        }
+
         var toolName = OpNameToToolNameMapper[opName];
         using var proc = ProcessRunner.Run("cmd.exe", new[] { "/c", $"{toolName} {args}" }, workingDirectory, ImmutableDictionary<string, string>.Empty, ct);
 

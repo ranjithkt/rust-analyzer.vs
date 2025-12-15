@@ -18,7 +18,7 @@ namespace KS.RustAnalyzer.TestAdapter.Cargo;
 public sealed class ToolchainService : IToolchainService
 {
     // Windows regex: matches paths like ...\target\debug\deps\name-hash.exe
-    private static readonly Regex TestExecutablePathCracker = new(@"^\s*Executable( unittests)? (.*) \((.*\\(.*)\-[\da-f]{16}.exe)\)$$", RegexOptions.Compiled | RegexOptions.IgnoreCase);
+    private static readonly Regex TestExecutablePathCracker = new(@"^\s*Executable( unittests)? (.*) \((.*\\(.*)\-[\da-f]{16}.exe)\)$", RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
     // WSL/Linux regex: matches paths like .../target/debug/deps/name-hash (no .exe extension)
     private static readonly Regex TestExecutablePathCrackerWsl = new(@"^\s*Executable( unittests)? (.*) \((.*/(.*)(?:-[\da-f]{16}))\)$", RegexOptions.Compiled | RegexOptions.IgnoreCase);
