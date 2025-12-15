@@ -32,21 +32,27 @@ public abstract class BaseToolchainCommand<T> : BaseCommand<T>
 
         try
         {
+            // VS 2026 Open Folder selection can be transient; don't rely solely on selection.
+            // Prefer selected Cargo.toml, otherwise fall back to workspace root Cargo.toml.
             var selectedItems = CmdServices.GetSelectedItems();
-            if (selectedItems.Count() != 1)
+            PathEx manifest;
+            if (selectedItems.Count() == 1 && selectedItems.First().IsManifest() && selectedItems.First().FileExists())
             {
-                Command.Visible = Command.Enabled = false;
-                return;
+                manifest = selectedItems.First();
+            }
+            else
+            {
+                manifest = CmdServices.GetWorkspaceRoot() + Constants.ManifestFileName2;
             }
 
-            var path = selectedItems.First();
-            Command.Visible = Command.Enabled = path.IsManifest() && path.FileExists();
+            var canRun = manifest.IsManifest() && manifest.FileExists();
+            Command.Visible = Command.Enabled = Command.Supported = canRun;
         }
         catch
         {
             // In some VS/Open Folder contexts selection APIs can be transient.
             // Never throw from status queries.
-            Command.Visible = Command.Enabled = false;
+            Command.Visible = Command.Enabled = Command.Supported = false;
         }
     }
 
@@ -125,7 +131,7 @@ public abstract class BaseBuildToolChainCommand<T> : BaseCommand<T>
         ThreadHelper.ThrowIfNotOnUIThread();
 
         var workspaceRoot = CmdServices.GetWorkspaceRoot();
-        return (workspaceRoot + Constants.ManifestFileName2).FileExists() && CmdServices.IsIdeInDesignMode();
+        return (workspaceRoot + Constants.ManifestFileName2).FileExists();
     }
 }
 

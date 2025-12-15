@@ -57,7 +57,9 @@ public abstract class BaseRustAnalyzerCommand<T> : BaseCommand<T>
         ThreadHelper.ThrowIfNotOnUIThread();
 
         var workspaceRoot = CmdServices.GetWorkspaceRoot();
-        return (workspaceRoot + Constants.ManifestFileName2).FileExists() && CmdServices.IsIdeInDesignMode();
+        // On some VS/Open Folder/WSL contexts, debugger services can be unavailable transiently.
+        // We only require that a Cargo.toml exists under the workspace root.
+        return (workspaceRoot + Constants.ManifestFileName2).FileExists();
     }
 
     protected abstract void ExecuteCore(object sender, OleMenuCmdEventArgs eventArgs);
