@@ -9,6 +9,9 @@ namespace KS.RustAnalyzer.TestAdapter.Cargo;
 
 public static class WorkspaceExtensions
 {
+    /// <summary>
+    /// Windows crate type info: binary targets have .exe extension.
+    /// </summary>
     public static readonly IReadOnlyDictionary<Workspace.CrateType, (string Prefix, string Extension)> CrateTypeInfos =
         new Dictionary<Workspace.CrateType, (string, string)>
         {
@@ -21,6 +24,21 @@ public static class WorkspaceExtensions
             [Workspace.CrateType.Bin] = (string.Empty, ".exe"),
         };
 
+    /// <summary>
+    /// WSL/Linux crate type info: binary targets have no extension.
+    /// </summary>
+    public static readonly IReadOnlyDictionary<Workspace.CrateType, (string Prefix, string Extension)> CrateTypeInfosWsl =
+        new Dictionary<Workspace.CrateType, (string, string)>
+        {
+            [Workspace.CrateType.Lib] = ("lib", ".rlib"),
+            [Workspace.CrateType.RLib] = ("lib", ".rlib"),
+            [Workspace.CrateType.DyLib] = ("lib", ".so"),
+            [Workspace.CrateType.CdyLib] = ("lib", ".so"),
+            [Workspace.CrateType.StaticLib] = ("lib", ".a"),
+            [Workspace.CrateType.ProcMacro] = ("lib", ".so"),
+            [Workspace.CrateType.Bin] = (string.Empty, string.Empty), // No extension for Linux binaries
+        };
+
     private static readonly IReadOnlyDictionary<string, PathEx> ProfileInfos = new Dictionary<string, PathEx>
     {
         ["dev"] = (PathEx)"debug",
@@ -31,9 +49,31 @@ public static class WorkspaceExtensions
 
     public static IEnumerable<Workspace.Target> GetTargets(this Workspace.Package @this) => @this.Targets;
 
+    /// <summary>
+    /// Creates the target filename using Windows conventions (.exe for binaries).
+    /// </summary>
     public static PathEx CreateTargetFileName(this Workspace.Target @this)
     {
-        return (PathEx)$"{CrateTypeInfos[@this.CrateTypes[0]].Prefix}{@this.Name}{CrateTypeInfos[@this.CrateTypes[0]].Extension}";
+        return CreateTargetFileName(@this, isWsl: false);
+    }
+
+    /// <summary>
+    /// Creates the target filename using appropriate conventions based on platform.
+    /// For WSL, binary targets have no extension.
+    /// </summary>
+    public static PathEx CreateTargetFileName(this Workspace.Target @this, bool isWsl)
+    {
+        var crateTypeInfo = isWsl ? CrateTypeInfosWsl : CrateTypeInfos;
+        return (PathEx)$"{crateTypeInfo[@this.CrateTypes[0]].Prefix}{@this.Name}{crateTypeInfo[@this.CrateTypes[0]].Extension}";
+    }
+
+    /// <summary>
+    /// Checks if the workspace root is a WSL path and creates the target filename accordingly.
+    /// </summary>
+    public static PathEx CreateTargetFileNameForWorkspace(this Workspace.Target @this)
+    {
+        var isWsl = WslInfo.IsWslPath(@this.Parent.Parent.WorkspaceRoot);
+        return CreateTargetFileName(@this, isWsl);
     }
 
     public static PathEx GetPath(this Workspace.Target @this, string profile)

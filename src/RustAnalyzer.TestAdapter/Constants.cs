@@ -22,6 +22,10 @@ public static class Constants
     public const string RAExeNameNoExtension = "rust-analyzer";
     public const string CargoExe = "cargo.exe";
 
+    // WSL-specific constants
+    public const string WslCargoExe = "cargo";
+    public const string WslRustUpExe = "rustup";
+
     public const string ConfigurationSectionName = "rust-analyzer.vs";
     public const string RAVsVersion = "RAVsVersion";
 

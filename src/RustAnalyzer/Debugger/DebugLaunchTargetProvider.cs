@@ -14,6 +14,8 @@ using Microsoft.VisualStudio.Workspace;
 using Microsoft.VisualStudio.Workspace.Debug;
 using static Microsoft.VisualStudio.VSConstants;
 
+// WSL debugging support: uses bstrPortName = "SSH:wsl+<distro>" for remote debugging
+
 namespace KS.RustAnalyzer.Debugger;
 
 // TODO: Workaround for https://github.com/kitamstudios/rust-analyzer.vs/issues/24. Just implementing LaunchDebugTargetProviderOptions.IsRuntimeSupportContext should be enough but it does not work, for now setting priority to low.
@@ -63,7 +65,11 @@ public sealed class DebugLaunchTargetProvider : ILaunchDebugTargetProvider
             }
 
             var processName = target.GetPath(profile);
-            if (!File.Exists(processName))
+
+            // Check if this is a WSL workspace
+            var isWsl = WslInfo.TryParse(package.Parent.WorkspaceRoot, out var wslInfo);
+
+            if (!isWsl && !File.Exists(processName))
             {
                 var message = string.Format("Unable to find file: '{0}'.", processName);
                 L.WriteLine(message);
@@ -77,31 +83,18 @@ public sealed class DebugLaunchTargetProvider : ILaunchDebugTargetProvider
             var workingDirectory = await GetSettingsAsync(SettingsInfo.TypeDebuggerWorkingDirectory, workspaceContext.GetService<ISettingsService>(), lcw);
             var noDebugFlag = lcw.ContainsKey(LaunchConfigurationConstants.NoDebugKey) ? __VSDBGLAUNCHFLAGS.DBGLAUNCH_NoDebug : 0;
 
-            L.WriteLine("LaunchDebugTarget with profile: {0}, launchConfiguration: {1}", profile, lcw.SerializeObject());
-            T.TrackEvent("Debug", ("Target", targetFQN), ("Profile", profile), ("Manifest", package.FullPath), ("Args", args), ("Env", env.ReplaceNullWithBar()));
+            L.WriteLine("LaunchDebugTarget with profile: {0}, launchConfiguration: {1}, IsWsl: {2}", profile, lcw.SerializeObject(), isWsl);
+            T.TrackEvent("Debug", ("Target", targetFQN), ("Profile", profile), ("Manifest", package.FullPath), ("Args", args), ("Env", env.ReplaceNullWithBar()), ("IsWsl", $"{isWsl}"));
 
-            var binLibPaths = await ToolchainServiceExtensions.GetBinAndLibPathsAsync(package.Parent.WorkspaceRoot, ct);
-            var info = new VsDebugTargetInfo
+            VsDebugTargetInfo info;
+            if (isWsl)
             {
-                dlo = DEBUG_LAUNCH_OPERATION.DLO_CreateProcess,
-                bstrExe = processName,
-                bstrCurDir = workingDirectory.IsNullOrEmpty() ? Path.GetDirectoryName(processName) : workingDirectory,
-                bstrArg = args,
-                bstrEnv = env.OverrideProcessEnvironment()
-                    .PrependToPathInEnviroment(
-                        package.GetDepsPath(profile),
-                        package.GetTargetPath(profile),
-                        binLibPaths.Lib,
-                        binLibPaths.Bin).ToEnvironmentBlock(),
-                bstrOptions = null,
-                bstrPortName = null,
-                bstrMdmRegisteredName = null,
-                bstrRemoteMachine = null,
-                cbSize = (uint)System.Runtime.InteropServices.Marshal.SizeOf<VsDebugTargetInfo>(),
-                grfLaunch = (uint)(noDebugFlag | __VSDBGLAUNCHFLAGS.DBGLAUNCH_Silent | __VSDBGLAUNCHFLAGS.DBGLAUNCH_StopDebuggingOnEnd),
-                fSendStdoutToOutputWindow = 0,
-                clsidCustom = DebugEnginesGuids.NativeOnly_guid,
-            };
+                info = await CreateWslDebugTargetInfoAsync(package, target, profile, processName, args, workingDirectory, noDebugFlag, wslInfo, ct);
+            }
+            else
+            {
+                info = await CreateWindowsDebugTargetInfoAsync(package, profile, processName, args, env, workingDirectory, noDebugFlag, ct);
+            }
 
             VsShellUtilities.LaunchDebugger(serviceProvider, info);
         }
@@ -116,6 +109,90 @@ public sealed class DebugLaunchTargetProvider : ILaunchDebugTargetProvider
             T.TrackException(e);
             throw;
         }
+    }
+
+    /// <summary>
+    /// Creates debug target info for Windows workspaces (original behavior).
+    /// </summary>
+    private async Task<VsDebugTargetInfo> CreateWindowsDebugTargetInfoAsync(
+        Workspace.Package package,
+        string profile,
+        PathEx processName,
+        string args,
+        string env,
+        string workingDirectory,
+        __VSDBGLAUNCHFLAGS noDebugFlag,
+        CancellationToken ct)
+    {
+        var binLibPaths = await ToolchainServiceExtensions.GetBinAndLibPathsAsync(package.Parent.WorkspaceRoot, ct);
+
+        return new VsDebugTargetInfo
+        {
+            dlo = DEBUG_LAUNCH_OPERATION.DLO_CreateProcess,
+            bstrExe = processName,
+            bstrCurDir = workingDirectory.IsNullOrEmpty() ? Path.GetDirectoryName(processName) : workingDirectory,
+            bstrArg = args,
+            bstrEnv = env.OverrideProcessEnvironment()
+                .PrependToPathInEnviroment(
+                    package.GetDepsPath(profile),
+                    package.GetTargetPath(profile),
+                    binLibPaths.Lib,
+                    binLibPaths.Bin).ToEnvironmentBlock(),
+            bstrOptions = null,
+            bstrPortName = null,
+            bstrMdmRegisteredName = null,
+            bstrRemoteMachine = null,
+            cbSize = (uint)System.Runtime.InteropServices.Marshal.SizeOf<VsDebugTargetInfo>(),
+            grfLaunch = (uint)(noDebugFlag | __VSDBGLAUNCHFLAGS.DBGLAUNCH_Silent | __VSDBGLAUNCHFLAGS.DBGLAUNCH_StopDebuggingOnEnd),
+            fSendStdoutToOutputWindow = 0,
+            clsidCustom = DebugEnginesGuids.NativeOnly_guid,
+        };
+    }
+
+    /// <summary>
+    /// Creates debug target info for WSL workspaces using SSH:wsl+distro transport.
+    /// </summary>
+    private async Task<VsDebugTargetInfo> CreateWslDebugTargetInfoAsync(
+        Workspace.Package package,
+        Workspace.Target target,
+        string profile,
+        PathEx processName,
+        string args,
+        string workingDirectory,
+        __VSDBGLAUNCHFLAGS noDebugFlag,
+        WslInfo wslInfo,
+        CancellationToken ct)
+    {
+        // Convert Windows UNC paths to Linux paths for WSL debugging
+        var linuxExePath = wslInfo.ToLinuxPath(processName);
+        var linuxWorkingDir = workingDirectory.IsNullOrEmpty()
+            ? wslInfo.ToLinuxPath(processName.GetDirectoryName())
+            : (WslInfo.IsWslPath(workingDirectory) ? wslInfo.ToLinuxPath(workingDirectory) : workingDirectory);
+
+        // For WSL debugging, we use the SSH:wsl+<distro> port name
+        // This tells VS to use the WSL debugging transport
+        var portName = $"SSH:wsl+{wslInfo.DistroName}";
+
+        L.WriteLine("Creating WSL debug target: exe={0}, workDir={1}, portName={2}", linuxExePath, linuxWorkingDir, portName);
+
+        return new VsDebugTargetInfo
+        {
+            dlo = DEBUG_LAUNCH_OPERATION.DLO_CreateProcess,
+            bstrExe = linuxExePath,
+            bstrCurDir = linuxWorkingDir,
+            bstrArg = args,
+            // For WSL debugging, we don't pass the Windows environment block
+            // The debugger will use the WSL environment
+            bstrEnv = null,
+            bstrOptions = null,
+            bstrPortName = portName,
+            bstrMdmRegisteredName = null,
+            bstrRemoteMachine = null,
+            cbSize = (uint)System.Runtime.InteropServices.Marshal.SizeOf<VsDebugTargetInfo>(),
+            grfLaunch = (uint)(noDebugFlag | __VSDBGLAUNCHFLAGS.DBGLAUNCH_Silent | __VSDBGLAUNCHFLAGS.DBGLAUNCH_StopDebuggingOnEnd),
+            fSendStdoutToOutputWindow = 0,
+            clsidCustom = DebugEnginesGuids.NativeOnly_guid,
+        };
     }
 
     private Task<string> GetSettingsAsync(string type, ISettingsService settingsService, LaunchConfigWrapper lcw)

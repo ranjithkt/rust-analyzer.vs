@@ -104,36 +104,85 @@ public class TestExecutor : BaseTestExecutor, ITestExecutor
 
     private static async Task RunTestsFromOneExe(PathEx exe, string[] args, IReadOnlyDictionary<string, TestCase> testCasesMap, IDictionary<string, string> envDict, TL tl, bool isBeingDebugged, IFrameworkHandle fh, CancellationToken ct)
     {
-        tl.L.WriteLine("... RunTestsFromOneExe starting with {0}, {1}", exe, args.Length);
-        tl.T.TrackEvent("RunTestsFromOneSourceAsync", ("IsBeingDebugged", $"{isBeingDebugged}"), ("Args", string.Join("|", args)));
+        // Check if this is a WSL test executable
+        var isWsl = WslInfo.TryParse(exe, out var wslInfo);
+
+        tl.L.WriteLine("... RunTestsFromOneExe starting with {0}, {1}, IsWsl: {2}", exe, args.Length, isWsl);
+        tl.T.TrackEvent("RunTestsFromOneSourceAsync", ("IsBeingDebugged", $"{isBeingDebugged}"), ("Args", string.Join("|", args)), ("IsWsl", $"{isWsl}"));
         var trs = Enumerable.Empty<TestResult>();
+
         if (isBeingDebugged)
         {
             tl.L.WriteLine("RunTestsFromOneSourceAsync launching test under debugger.");
-            var rc = fh.LaunchProcessWithDebuggerAttached(exe, exe.GetDirectoryName(), string.Join(" ", args), envDict);
-            if (rc != 0)
+            if (isWsl)
             {
-                tl.L.WriteError("RunTestsFromOneSourceAsync launching test under debugger - returned {0}.", rc);
+                // For WSL debugging, we need to convert paths and use appropriate mechanism
+                // Note: LaunchProcessWithDebuggerAttached may not support WSL directly
+                // This is a best-effort approach - full WSL test debugging may need additional work
+                var linuxExe = wslInfo.ToLinuxPath(exe);
+                var linuxWorkingDir = wslInfo.ToLinuxPath(exe.GetDirectoryName());
+                tl.L.WriteLine("WSL test debug: exe={0}, workDir={1}", linuxExe, linuxWorkingDir);
+
+                // Use wsl.exe to run the test, but note that debugger attach may not work correctly
+                // Users can debug tests by running them individually with F5
+                var wslExePath = WslInfo.GetWslExePath();
+                var wslArgs = new List<string> { "-d", wslInfo.DistroName, "--cd", linuxWorkingDir, "--exec", linuxExe };
+                wslArgs.AddRange(args);
+
+                var rc = fh.LaunchProcessWithDebuggerAttached(wslExePath, null, string.Join(" ", wslArgs), envDict);
+                if (rc != 0)
+                {
+                    tl.L.WriteError("RunTestsFromOneSourceAsync launching WSL test under debugger - returned {0}.", rc);
+                }
+            }
+            else
+            {
+                var rc = fh.LaunchProcessWithDebuggerAttached(exe, exe.GetDirectoryName(), string.Join(" ", args), envDict);
+                if (rc != 0)
+                {
+                    tl.L.WriteError("RunTestsFromOneSourceAsync launching test under debugger - returned {0}.", rc);
+                }
             }
         }
         else
         {
-            using var testExeProc = await ProcessRunner.RunWithLogging(exe, args, exe.GetDirectoryName(), envDict, ct, tl.L, @throw: false);
-            trs = testExeProc.StandardOutputLines
-                .Skip(1)
-                .Take(testExeProc.StandardOutputLines.Count() - 2)
-                .Select(JsonConvert.DeserializeObject<TestRunInfo>)
-                .Where(x => x.Event != TestRunInfo.EventType.Started)
-                .OrderBy(x => x.FQN)
-                .Select(x => ToTestResult(exe, x, testCasesMap));
-            var ec = testExeProc.ExitCode ?? 0;
-            if (ec != 0 && !trs.Any())
+            ProcessRunner testExeProc;
+
+            if (isWsl)
             {
-                tl.L.WriteError("RunTestsFromOneSourceAsync test executable exited with code {0}.", ec);
-                throw new ApplicationException($"Test executable returned {ec}. Check above for the arguments passed to test executable by running it on the command line.");
+                // Run test executable via WSL
+                var linuxExe = wslInfo.ToLinuxPath(exe);
+                var linuxWorkingDir = wslInfo.ToLinuxPath(exe.GetDirectoryName());
+                testExeProc = ToolchainServiceExtensions.RunInWsl(wslInfo, linuxExe, args, linuxWorkingDir, envDict, ct);
+            }
+            else
+            {
+                testExeProc = ProcessRunner.Run(exe, args, exe.GetDirectoryName(), envDict, ct);
             }
 
-            tl.T.TrackEvent("RunTestsFromOneSourceAsync", ("Results", $"{trs.Count()}"));
+            using (testExeProc)
+            {
+                tl.L.WriteLine("Started PID:{0} with args: {1}...", testExeProc.ProcessId, testExeProc.Arguments);
+                var exitCode = await testExeProc;
+                tl.L.WriteLine("... Finished PID {0} with exit code {1}.", testExeProc.ProcessId, testExeProc.ExitCode);
+
+                trs = testExeProc.StandardOutputLines
+                    .Skip(1)
+                    .Take(testExeProc.StandardOutputLines.Count() - 2)
+                    .Select(JsonConvert.DeserializeObject<TestRunInfo>)
+                    .Where(x => x.Event != TestRunInfo.EventType.Started)
+                    .OrderBy(x => x.FQN)
+                    .Select(x => ToTestResult(exe, x, testCasesMap));
+
+                var ec = testExeProc.ExitCode ?? 0;
+                if (ec != 0 && !trs.Any())
+                {
+                    tl.L.WriteError("RunTestsFromOneSourceAsync test executable exited with code {0}.", ec);
+                    throw new ApplicationException($"Test executable returned {ec}. Check above for the arguments passed to test executable by running it on the command line.");
+                }
+
+                tl.T.TrackEvent("RunTestsFromOneSourceAsync", ("Results", $"{trs.Count()}"));
+            }
         }
 
         foreach (var tr in trs)

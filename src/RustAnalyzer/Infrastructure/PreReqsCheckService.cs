@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Collections.Immutable;
 using System.ComponentModel.Composition;
 using System.Linq;
 using System.Text;
@@ -16,6 +17,12 @@ namespace KS.RustAnalyzer.Infrastructure;
 public interface IPreReqsCheckService
 {
     Task SatisfyAsync(CancellationToken ct);
+
+    /// <summary>
+    /// Performs workspace-specific prerequisite checks.
+    /// For WSL workspaces, checks WSL availability and toolchain inside the distro.
+    /// </summary>
+    Task SatisfyForWorkspaceAsync(PathEx workspaceRoot, CancellationToken ct);
 }
 
 [Export(typeof(IPreReqsCheckService))]
@@ -65,6 +72,129 @@ public sealed class PreReqsCheckService : IPreReqsCheckService
             VsShellUtilities.OpenSystemBrowser(Constants.PrerequisitesUrl);
             await CommunityVS.Shell.RestartAsync();
         }
+    }
+
+    public async Task SatisfyForWorkspaceAsync(PathEx workspaceRoot, CancellationToken ct)
+    {
+        // Check if this is a WSL workspace
+        if (!WslInfo.TryParse(workspaceRoot, out var wslInfo))
+        {
+            // Not a WSL workspace - standard checks already passed in SatisfyAsync
+            return;
+        }
+
+        var results = await DoWslChecksAsync(wslInfo, ct);
+
+        var failures = results.Where(x => !x.Success);
+        if (failures.Any())
+        {
+            var line1 = failures
+                .Aggregate(
+                    new StringBuilder($"WSL prerequisite check(s) failed for distro '{wslInfo.DistroName}':"),
+                    (acc, e) => acc.AppendLine().AppendFormat("- {0}", e.Message))
+                .ToString();
+            await VsCommon.ShowMessageBoxAsync(
+                line1,
+                $"Please ensure WSL is properly configured and Rust toolchain is installed inside WSL distro '{wslInfo.DistroName}'.");
+        }
+    }
+
+    private async Task<IEnumerable<(bool Success, string Message)>> DoWslChecksAsync(WslInfo wslInfo, CancellationToken ct)
+    {
+        var results = new List<(bool Success, string Message)>();
+
+        // Check wsl.exe availability
+        _tl.L.WriteLine("Running WSL PreReqCheck: CheckWslExeAsync...");
+        var (wslSuccess, wslMessage) = await CheckWslExeAsync(ct);
+        if (!wslSuccess)
+        {
+            _tl.L.WriteLine("... CheckWslExeAsync failed: {0}.", wslMessage);
+            _tl.T.TrackException(new ArgumentOutOfRangeException(wslMessage));
+            results.Add((wslSuccess, wslMessage));
+            return results; // Cannot proceed without wsl.exe
+        }
+
+        // Check cargo inside WSL
+        _tl.L.WriteLine("Running WSL PreReqCheck: CheckCargoInWslAsync...");
+        var (cargoSuccess, cargoMessage) = await CheckCargoInWslAsync(wslInfo, ct);
+        if (!cargoSuccess)
+        {
+            _tl.L.WriteLine("... CheckCargoInWslAsync failed: {0}.", cargoMessage);
+            _tl.T.TrackException(new ArgumentOutOfRangeException(cargoMessage));
+            results.Add((cargoSuccess, cargoMessage));
+        }
+
+        // Check rustup inside WSL
+        _tl.L.WriteLine("Running WSL PreReqCheck: CheckRustupInWslAsync...");
+        var (rustupSuccess, rustupMessage) = await CheckRustupInWslAsync(wslInfo, ct);
+        if (!rustupSuccess)
+        {
+            _tl.L.WriteLine("... CheckRustupInWslAsync failed: {0}.", rustupMessage);
+            _tl.T.TrackException(new ArgumentOutOfRangeException(rustupMessage));
+            results.Add((rustupSuccess, rustupMessage));
+        }
+
+        return results;
+    }
+
+    private static async Task<(bool Success, string Message)> CheckWslExeAsync(CancellationToken ct)
+    {
+        try
+        {
+            if (WslInfo.IsWslAvailable())
+            {
+                return await (true, string.Empty).ToTask();
+            }
+        }
+        catch
+        {
+        }
+
+        return (false, "wsl.exe not found. Please ensure WSL is installed.");
+    }
+
+    private static async Task<(bool Success, string Message)> CheckCargoInWslAsync(WslInfo wslInfo, CancellationToken ct)
+    {
+        try
+        {
+            var wslExePath = WslInfo.GetWslExePath();
+            var wslArgs = new[] { "-d", wslInfo.DistroName, "--exec", Constants.WslCargoExe, "--version" };
+
+            using var proc = ProcessRunner.Run(wslExePath, wslArgs, null, ImmutableDictionary<string, string>.Empty, ct);
+            var ec = await proc;
+
+            if (ec == 0 && proc.StandardOutputLines.Any())
+            {
+                return (true, string.Empty);
+            }
+        }
+        catch
+        {
+        }
+
+        return (false, $"cargo not found in WSL distro '{wslInfo.DistroName}'. Please install Rust toolchain inside WSL.");
+    }
+
+    private static async Task<(bool Success, string Message)> CheckRustupInWslAsync(WslInfo wslInfo, CancellationToken ct)
+    {
+        try
+        {
+            var wslExePath = WslInfo.GetWslExePath();
+            var wslArgs = new[] { "-d", wslInfo.DistroName, "--exec", Constants.WslRustUpExe, "--version" };
+
+            using var proc = ProcessRunner.Run(wslExePath, wslArgs, null, ImmutableDictionary<string, string>.Empty, ct);
+            var ec = await proc;
+
+            if (ec == 0 && proc.StandardOutputLines.Any())
+            {
+                return (true, string.Empty);
+            }
+        }
+        catch
+        {
+        }
+
+        return (false, $"rustup not found in WSL distro '{wslInfo.DistroName}'. Please install rustup inside WSL.");
     }
 
     private async Task<IEnumerable<(bool Success, string Message)>> DoChecksAsync(CancellationToken ct)

@@ -8,6 +8,7 @@ using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
+using EnsureThat;
 using KS.RustAnalyzer.TestAdapter.Common;
 using Newtonsoft.Json;
 
@@ -245,6 +246,12 @@ public static class ToolchainServiceExtensions
 
     public static async Task<string[]> GetCommandOutput(string opName, string args, PathEx workingDirectory, CancellationToken ct)
     {
+        // Check if working directory is a WSL path
+        if (WslInfo.TryParse(workingDirectory, out var wslInfo))
+        {
+            return await GetCommandOutputWsl(opName, args, workingDirectory, wslInfo, ct);
+        }
+
         var toolName = OpNameToToolNameMapper[opName];
         using var proc = ProcessRunner.Run("cmd.exe", new[] { "/c", $"{toolName} {args}" }, workingDirectory, ImmutableDictionary<string, string>.Empty, ct);
 
@@ -256,6 +263,114 @@ public static class ToolchainServiceExtensions
         }
 
         return output;
+    }
+
+    /// <summary>
+    /// Executes a command inside WSL using wsl.exe.
+    /// </summary>
+    public static async Task<string[]> GetCommandOutputWsl(string opName, string args, PathEx workingDirectory, WslInfo wslInfo, CancellationToken ct)
+    {
+        EnsureArg.IsNotNull(wslInfo, nameof(wslInfo));
+
+        var toolName = OpNameToToolNameMapper[opName];
+        var linuxWorkingDir = wslInfo.ToLinuxPath(workingDirectory);
+        var wslExePath = WslInfo.GetWslExePath();
+
+        // Build wsl.exe arguments: -d <distro> --cd <dir> -- <command> <args>
+        var wslArgs = new[] { "-d", wslInfo.DistroName, "--cd", linuxWorkingDir, "--", toolName }.Concat(args.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries)).ToArray();
+
+        using var proc = ProcessRunner.Run(wslExePath, wslArgs, null, ImmutableDictionary<string, string>.Empty, ct);
+
+        var ec = await proc;
+        var output = proc.StandardOutputLines.Concat(proc.StandardErrorLines).ToArray();
+        if (ec != 0)
+        {
+            return new[] { $"{toolName} (WSL) returned {ec}.\nOutput: {string.Join(Environment.NewLine, output)}" };
+        }
+
+        return output;
+    }
+
+    /// <summary>
+    /// Runs a process in WSL. Returns the ProcessRunner for capturing output.
+    /// </summary>
+    public static ProcessRunner RunInWsl(WslInfo wslInfo, string command, string[] args, string linuxWorkingDir, IDictionary<string, string> env, CancellationToken ct)
+    {
+        EnsureArg.IsNotNull(wslInfo, nameof(wslInfo));
+
+        var wslExePath = WslInfo.GetWslExePath();
+
+        // Build wsl.exe arguments: -d <distro> --cd <dir> --exec <command> <args>
+        var wslArgs = new List<string> { "-d", wslInfo.DistroName };
+
+        if (!string.IsNullOrEmpty(linuxWorkingDir))
+        {
+            wslArgs.Add("--cd");
+            wslArgs.Add(linuxWorkingDir);
+        }
+
+        wslArgs.Add("--exec");
+        wslArgs.Add(command);
+        wslArgs.AddRange(args);
+
+        // Note: We pass null for working directory since wsl.exe handles --cd internally
+        // Environment variables are not directly passed; WSL inherits Windows environment
+        return ProcessRunner.Run(wslExePath, wslArgs.ToArray(), null, env ?? ImmutableDictionary<string, string>.Empty, ct);
+    }
+
+    /// <summary>
+    /// Runs cargo via WSL and returns the ProcessRunner for output capture.
+    /// </summary>
+    public static ProcessRunner RunCargoInWsl(WslInfo wslInfo, string[] cargoArgs, string linuxWorkingDir, CancellationToken ct)
+    {
+        return RunInWsl(wslInfo, Constants.WslCargoExe, cargoArgs, linuxWorkingDir, null, ct);
+    }
+
+    /// <summary>
+    /// Gets the bin and lib paths for debugging from within WSL.
+    /// </summary>
+    public static async Task<(string Bin, string Lib)> GetWslBinAndLibPathsAsync(WslInfo wslInfo, PathEx workingDirectory, CancellationToken ct)
+    {
+        EnsureArg.IsNotNull(wslInfo, nameof(wslInfo));
+
+        var linuxWorkingDir = wslInfo.ToLinuxPath(workingDirectory);
+
+        // Get sysroot from rustc inside WSL
+        var wslExePath = WslInfo.GetWslExePath();
+        var wslArgs = new[] { "-d", wslInfo.DistroName, "--cd", linuxWorkingDir, "--exec", "rustc", "--print", "sysroot" };
+
+        using var proc = ProcessRunner.Run(wslExePath, wslArgs, null, ImmutableDictionary<string, string>.Empty, ct);
+        var ec = await proc;
+
+        if (ec != 0 || !proc.StandardOutputLines.Any())
+        {
+            // Fallback: return empty paths, debugger will rely on WSL environment
+            return (string.Empty, string.Empty);
+        }
+
+        var sysroot = proc.StandardOutputLines.First().Trim();
+
+        // Derive bin and lib paths from sysroot
+        var bin = $"{sysroot}/bin";
+
+        // Get the target triple
+        var tripleArgs = new[] { "-d", wslInfo.DistroName, "--cd", linuxWorkingDir, "--exec", "rustc", "-vV" };
+        using var tripleProc = ProcessRunner.Run(wslExePath, tripleArgs, null, ImmutableDictionary<string, string>.Empty, ct);
+        var tripleEc = await tripleProc;
+
+        var targetTriple = "x86_64-unknown-linux-gnu"; // Default fallback
+        if (tripleEc == 0)
+        {
+            var hostLine = tripleProc.StandardOutputLines.FirstOrDefault(l => l.StartsWith("host:"));
+            if (hostLine != null)
+            {
+                targetTriple = hostLine.Substring("host:".Length).Trim();
+            }
+        }
+
+        var lib = $"{sysroot}/lib/rustlib/{targetTriple}/lib";
+
+        return (bin, lib);
     }
 
     public static async Task<string> GetCommandOutputSingleLine(string opName, string versionArgs, PathEx workingDirectory, CancellationToken ct)

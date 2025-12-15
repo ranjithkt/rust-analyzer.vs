@@ -123,7 +123,7 @@ public sealed class Workspace
         [JsonProperty("crate_types")]
         public CrateType[] CrateTypes { get; set; }
 
-        public PathEx TargetFileName => this.CreateTargetFileName();
+        public PathEx TargetFileName => this.CreateTargetFileNameForWorkspace();
 
         // NOTE: Hide the integration executables from debug targets. They will be bugged through the test explorer.
         public bool IsRunnable => CrateTypes[0] == CrateType.Bin && Kinds[0] != Kind.Test && Kinds[0] != Kind.BenchMark;

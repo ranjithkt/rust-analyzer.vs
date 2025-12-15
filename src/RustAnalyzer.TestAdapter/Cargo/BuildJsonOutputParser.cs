@@ -93,33 +93,96 @@ public static class BuildJsonOutputParser
 
     private static DetailedBuildMessage CreateBuildMessage(PathEx workspaceRoot, dynamic obj, dynamic fileInfo = null, dynamic lineInfo = null, dynamic colInfo = null)
     {
+        // Check if workspace is WSL to handle path mapping
+        WslInfo.TryParse(workspaceRoot, out var wslInfo);
+
+        var srcPath = (string)obj.target.src_path.Value;
+        var resolvedSrcPath = ResolvePathForVs(srcPath, workspaceRoot, wslInfo);
+
         var msg = new DetailedBuildMessage
         {
             Code = GetMessageCode(obj.message),
             ColumnNumber = GetIntValue(colInfo, 1),
-            File = obj.target.src_path.Value,
+            File = resolvedSrcPath,
             HelpKeyword = GetMessageCode(obj.message),
             LineNumber = GetIntValue(lineInfo, 1),
-            ProjectFile = GetProjectFile(obj),
+            ProjectFile = ResolvePathForVs(GetProjectFile(obj), workspaceRoot, wslInfo),
             SubCategory = null,
             TaskText = obj.message.message.Value,
             Type = GetMessageType(obj.message.level.Value),
         };
 
-        msg.File = fileInfo != null && fileInfo.Value != null ? Path.Combine(workspaceRoot, fileInfo.Value) : msg.File;
+        if (fileInfo != null && fileInfo.Value != null)
+        {
+            var fileInfoPath = (string)fileInfo.Value;
+            msg.File = ResolveFileInfoPath(fileInfoPath, workspaceRoot, wslInfo);
+        }
+
         msg.LogMessage = GetLogMessage(obj.message, msg);
 
         return msg;
     }
 
-    private static dynamic GetProjectFile(dynamic obj)
+    /// <summary>
+    /// Resolves a path from cargo output for VS navigation.
+    /// For WSL workspaces, converts Linux absolute paths to Windows UNC paths.
+    /// </summary>
+    private static string ResolvePathForVs(string path, PathEx workspaceRoot, WslInfo wslInfo)
+    {
+        if (string.IsNullOrEmpty(path))
+        {
+            return path;
+        }
+
+        if (wslInfo != null && WslInfo.IsLinuxAbsolutePath(path))
+        {
+            return wslInfo.ToUncPath(path);
+        }
+
+        return path;
+    }
+
+    /// <summary>
+    /// Resolves the file_name field from spans, which may be relative or absolute.
+    /// </summary>
+    private static string ResolveFileInfoPath(string fileInfoPath, PathEx workspaceRoot, WslInfo wslInfo)
+    {
+        if (string.IsNullOrEmpty(fileInfoPath))
+        {
+            return fileInfoPath;
+        }
+
+        if (wslInfo != null)
+        {
+            // For WSL, cargo outputs Linux paths
+            if (WslInfo.IsLinuxAbsolutePath(fileInfoPath))
+            {
+                // Absolute Linux path - convert to UNC
+                return wslInfo.ToUncPath(fileInfoPath);
+            }
+            else
+            {
+                // Relative path - combine with workspace root (which is already UNC)
+                // The workspace root is UNC, and the relative path uses forward slashes from cargo
+                var normalizedRelPath = fileInfoPath.Replace('/', '\\');
+                return Path.Combine(workspaceRoot, normalizedRelPath);
+            }
+        }
+        else
+        {
+            // Windows workspace - use standard path combination
+            return Path.Combine(workspaceRoot, fileInfoPath);
+        }
+    }
+
+    private static string GetProjectFile(dynamic obj)
     {
         if (obj.manifest_path != null && obj.manifest_path.Value != null)
         {
-            return obj.manifest_path.Value;
+            return (string)obj.manifest_path.Value;
         }
 
-        return obj.package_id.Value;
+        return (string)obj.package_id.Value;
     }
 
     private static dynamic GetMessageCode(dynamic obj)
