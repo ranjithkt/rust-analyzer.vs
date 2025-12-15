@@ -30,15 +30,24 @@ public abstract class BaseToolchainCommand<T> : BaseCommand<T>
     {
         ThreadHelper.ThrowIfNotOnUIThread();
 
-        var selectedItems = CmdServices.GetSelectedItems();
-        if (selectedItems.Count() != 1)
+        try
         {
-            Command.Visible = Command.Enabled = false;
-            return;
-        }
+            var selectedItems = CmdServices.GetSelectedItems();
+            if (selectedItems.Count() != 1)
+            {
+                Command.Visible = Command.Enabled = false;
+                return;
+            }
 
-        var path = selectedItems.First();
-        Command.Visible = Command.Enabled = path.IsManifest() && path.FileExists();
+            var path = selectedItems.First();
+            Command.Visible = Command.Enabled = path.IsManifest() && path.FileExists();
+        }
+        catch
+        {
+            // In some VS/Open Folder contexts selection APIs can be transient.
+            // Never throw from status queries.
+            Command.Visible = Command.Enabled = false;
+        }
     }
 
     protected override async Task ExecuteAsync(OleMenuCmdEventArgs e)

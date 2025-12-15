@@ -39,7 +39,17 @@ public abstract class BaseRustAnalyzerCommand<T> : BaseCommand<T>
     {
         ThreadHelper.ThrowIfNotOnUIThread();
 
-        Command.Visible = Command.Enabled = Command.Supported = IsCommandActive();
+        try
+        {
+            Command.Visible = Command.Enabled = Command.Supported = IsCommandActive();
+        }
+        catch (Exception ex)
+        {
+            // Never let status queries throw (can cause commands to disappear intermittently).
+            Telemetry?.TrackException(ex, new[] { ("Command", typeof(T).Name), ("Phase", "BeforeQueryStatus") });
+            Logger?.WriteError("BeforeQueryStatus failed for {0}: {1}", typeof(T).Name, ex.Message);
+            Command.Visible = Command.Enabled = Command.Supported = false;
+        }
     }
 
     protected virtual bool IsCommandActive()

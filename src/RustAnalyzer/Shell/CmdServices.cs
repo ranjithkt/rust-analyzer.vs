@@ -87,13 +87,28 @@ public sealed class CmdServices
     {
         ThreadHelper.ThrowIfNotOnUIThread();
 
+        // Prefer Folder Workspace location when available (Open Folder scenarios, including WSL UNC).
+        try
+        {
+            var folderLocation = FolderWorkspaceService?.CurrentWorkspace?.Location;
+            if (!string.IsNullOrWhiteSpace(folderLocation))
+            {
+                return (PathEx)folderLocation;
+            }
+        }
+        catch
+        {
+            // Ignore and fall back to IVsSolution.
+        }
+
         string workspaceRoot = null;
         if (ErrorHandler.Failed(Solution?.GetSolutionInfo(out workspaceRoot, out var _, out var _) ?? VSConstants.E_FAIL))
         {
-            L.WriteError("Unable to determine workspace root.");
+            L?.WriteError("Unable to determine workspace root.");
         }
 
-        return (PathEx)workspaceRoot;
+        // Never return null here: PathEx does not allow null and status queries must not throw.
+        return (PathEx)(workspaceRoot ?? string.Empty);
     }
 
     public bool IsIdeInDesignMode()

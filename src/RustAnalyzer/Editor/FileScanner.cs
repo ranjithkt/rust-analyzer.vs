@@ -83,35 +83,15 @@ public class FileScanner : IFileScanner, IFileScannerUpToDateCheck
         {
             if (package.IsPackage)
             {
-                foreach (var target in package.GetTargets().Where(t => t.IsRunnable))
+                AddRunnableTargetsFileDataValues(allFileDataValues, package);
+            }
+            else
+            {
+                // Workspace root Cargo.toml may not be a package (pure [workspace]).
+                // Still expose runnable targets from member packages so the debug dropdown isn't empty.
+                foreach (var member in package.Parent.Packages.Where(p => p.IsPackage))
                 {
-                    var launchSettings = new PropertySettings
-                    {
-                        [LaunchConfigurationConstants.NameKey] = target.QualifiedTargetFileName,
-                        [LaunchConfigurationConstants.DebugTypeKey] = LaunchConfigurationConstants.NativeOptionKey,
-                        [LaunchConfigurationConstants.ProjectKey] = (string)package.FullPath,
-                        [LaunchConfigurationConstants.ProjectTargetKey] = target.QualifiedTargetFileName,
-                        [LaunchConfigurationConstants.ProgramKey] = (string)package.FullPath,
-                    };
-
-                    allFileDataValues.Add(
-                        new FileDataValue(
-                            type: DebugLaunchActionContext.ContextTypeGuid,
-                            name: DebugLaunchActionContext.IsDefaultStartupProjectEntry,
-                            value: launchSettings,
-                            target: null,
-                            context: null));
-
-                    var fileDataValuesForAllProfiles1 = package.GetProfiles().Select(
-                        profile =>
-                            new FileDataValue(
-                                type: BuildConfigurationContext.ContextTypeGuid,
-                                name: BuildConfigurationContext.DataValueName,
-                                value: null,
-                                target: target.GetPath(profile),
-                                context: profile));
-
-                    allFileDataValues.AddRange(fileDataValuesForAllProfiles1);
+                    AddRunnableTargetsFileDataValues(allFileDataValues, member);
                 }
             }
 
@@ -180,6 +160,40 @@ public class FileScanner : IFileScanner, IFileScannerUpToDateCheck
         allFileDataValues.AddRange(forExamples);
 
         return allFileDataValues;
+    }
+
+    private static void AddRunnableTargetsFileDataValues(List<FileDataValue> allFileDataValues, Workspace.Package package)
+    {
+        foreach (var target in package.GetTargets().Where(t => t.IsRunnable))
+        {
+            var launchSettings = new PropertySettings
+            {
+                [LaunchConfigurationConstants.NameKey] = target.QualifiedTargetFileName,
+                [LaunchConfigurationConstants.DebugTypeKey] = LaunchConfigurationConstants.NativeOptionKey,
+                [LaunchConfigurationConstants.ProjectKey] = (string)package.FullPath,
+                [LaunchConfigurationConstants.ProjectTargetKey] = target.QualifiedTargetFileName,
+                [LaunchConfigurationConstants.ProgramKey] = (string)package.FullPath,
+            };
+
+            allFileDataValues.Add(
+                new FileDataValue(
+                    type: DebugLaunchActionContext.ContextTypeGuid,
+                    name: DebugLaunchActionContext.IsDefaultStartupProjectEntry,
+                    value: launchSettings,
+                    target: null,
+                    context: null));
+
+            var fileDataValuesForAllProfiles1 = package.GetProfiles().Select(
+                profile =>
+                    new FileDataValue(
+                        type: BuildConfigurationContext.ContextTypeGuid,
+                        name: BuildConfigurationContext.DataValueName,
+                        value: null,
+                        target: target.GetPath(profile),
+                        context: profile));
+
+            allFileDataValues.AddRange(fileDataValuesForAllProfiles1);
+        }
     }
 
     private static List<FileReferenceInfo> GetFileReferenceInfos(Workspace.Package package, PathEx filePath)
