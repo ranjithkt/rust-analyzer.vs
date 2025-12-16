@@ -66,11 +66,31 @@ public sealed class ToolchainService : IToolchainService
         if (success)
         {
             var w = await GetWorkspaceAsync(bti.ManifestPath, ct);
-            var testContainers = w.Packages.SelectMany(p => p.GetTestContainers(bti.Profile));
+
+            // IMPORTANT:
+            // Do NOT rewrite all *.rusttests files on every build.
+            // Rewriting them (especially with TestExes cleared) triggers VS Test Explorer rediscovery,
+            // which runs `cargo test --no-run` and makes it look like VS "rebuilds the whole workspace"
+            // every time you hit Build.
+            //
+            // Instead:
+            // - delete stale containers (best-effort), and
+            // - only create missing containers (leave existing ones untouched so discovery can be incremental).
+            var testContainers = w.Packages.SelectMany(p => p.GetTestContainers(bti.Profile)).ToArray();
             w.TargetDirectory.MakeProfilePath(bti.Profile).CleanTestContainers(testContainers.Select(x => x.Container));
-            var tasks = testContainers
-                .Select(x => x.Container.WriteTestContainerAsync(x.Target.Parent.ManifestPath, w.TargetDirectory, bti.AdditionalTestDiscoveryArguments, bti.AdditionalTestExecutionArguments, bti.TestExecutionEnvironment, bti.Profile, Array.Empty<PathEx>(), ct));
-            await Task.WhenAll(tasks);
+
+            var createTasks = testContainers
+                .Where(x => !x.Container.FileExists())
+                .Select(x => x.Container.WriteTestContainerAsync(
+                    x.Target.Parent.ManifestPath,
+                    w.TargetDirectory,
+                    bti.AdditionalTestDiscoveryArguments,
+                    bti.AdditionalTestExecutionArguments,
+                    bti.TestExecutionEnvironment,
+                    bti.Profile,
+                    Array.Empty<PathEx>(),
+                    ct));
+            await Task.WhenAll(createTasks);
         }
 
         return success;
@@ -356,6 +376,17 @@ public sealed class ToolchainService : IToolchainService
 
         try
         {
+            // Fast path:
+            // If the test container already knows its test executables and they still exist,
+            // don't run `cargo test --no-run` again. That command can be very expensive and
+            // is the main reason users observe "rebuilds every time" behavior in VS.
+            if (tc.TestExes != null &&
+                tc.TestExes.Length > 0 &&
+                tc.TestExes.All(e => e.FileExists()))
+            {
+                return tc.TestExes.Select(async exe => await GetTestSuiteInfoFromOneTestExeAsync(tc, exe, ct));
+            }
+
             var workingDir = tc.Manifest.GetDirectoryName();
             var isWsl = TargetSystemSelection.TryGetWslExecutionContext(workingDir, out var wslInfo, out var distroName);
 
