@@ -1,4 +1,5 @@
 using System;
+using System.IO;
 using System.Text.RegularExpressions;
 
 namespace KS.RustAnalyzer.TestAdapter.Common;
@@ -43,7 +44,18 @@ public static class WslMirrorPathMapper
             return false;
         }
 
-        var m = WindowsDrivePath.Match(windowsPath.Trim());
+        var normalizedWindowsPath = windowsPath.Trim();
+        try
+        {
+            // Normalize separators and ".." segments so mirror paths are stable even if callers vary.
+            normalizedWindowsPath = Path.GetFullPath(normalizedWindowsPath);
+        }
+        catch
+        {
+            // Best-effort only.
+        }
+
+        var m = WindowsDrivePath.Match(normalizedWindowsPath);
         if (!m.Success)
         {
             return false;

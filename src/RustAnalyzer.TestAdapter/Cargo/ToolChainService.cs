@@ -5,6 +5,7 @@ using System.Collections.ObjectModel;
 using System.ComponentModel.Composition;
 using System.IO;
 using System.Linq;
+using System.Runtime.InteropServices;
 using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
@@ -394,6 +395,11 @@ public sealed class ToolchainService : IToolchainService
                 {
                     token[propertyName] = winPath;
                 }
+                else if (WslMirrorPathMapper.TryMirrorLinuxToWindowsPathBySentinel(linuxPath, out var mirrorWin))
+                {
+                    // Future-proofing: if metadata is ever produced from mirror paths, map them back too.
+                    token[propertyName] = mirrorWin;
+                }
             }
         }
     }
@@ -651,12 +657,53 @@ public sealed class ToolchainService : IToolchainService
         if (isWsl)
         {
             // For WSL, the test exe is a Linux ELF binary. Run it inside WSL.
-            var linuxExePath = wslInfo != null
-                ? wslInfo.ToLinuxPath(testExePath)
-                : (WslPathMapper.TryWindowsToWslPath(testExePath, out var lex) ? lex : null);
-            var linuxWorkingDir = wslInfo != null
-                ? wslInfo.ToLinuxPath(workspaceRoot)
-                : (WslPathMapper.TryWindowsToWslPath(workspaceRoot, out var lwd) ? lwd : null);
+            // Mirror mode typically stores test exes/target dir as UNC (\\wsl.localhost\...),
+            // but be defensive: if wslInfo is null (Mode 2 selection) try to derive a WslInfo from the paths.
+            var effectiveWslInfo = wslInfo;
+            if (effectiveWslInfo == null)
+            {
+                if (WslInfo.TryParse(testExePath, out var fromExe) && fromExe != null)
+                {
+                    effectiveWslInfo = fromExe;
+                    distroName = fromExe.DistroName;
+                }
+                else if (WslInfo.TryParse(container.TargetDir, out var fromTarget) && fromTarget != null)
+                {
+                    effectiveWslInfo = fromTarget;
+                    distroName = fromTarget.DistroName;
+                }
+            }
+
+            string linuxExePath;
+            string linuxWorkingDir;
+            if (effectiveWslInfo != null)
+            {
+                linuxExePath = effectiveWslInfo.ToLinuxPath(testExePath);
+                linuxWorkingDir = effectiveWslInfo.ToLinuxPath(workspaceRoot);
+            }
+            else
+            {
+                // Mode 2 (Windows workspace + WSL execution). Prefer mirror working dir when available.
+                var wsRootWin = TargetSystemSelection.TryGetWorkspaceRoot(out var wr) ? wr : workspaceRoot;
+                var mirror = WslMirrorManager.GetOrCreate(wsRootWin, distroName);
+                await mirror.EnsureInitializedAsync(ct); // cheap: does not rsync
+                var cfg = mirror.Config;
+
+                if (cfg != null &&
+                    WslMirrorPathMapper.TryWindowsToMirrorLinuxPath((string)testExePath, cfg, out var lex) &&
+                    WslMirrorPathMapper.TryWindowsToMirrorLinuxPath((string)workspaceRoot, cfg, out var lwd))
+                {
+                    linuxExePath = lex;
+                    linuxWorkingDir = lwd;
+                }
+                else
+                {
+                    // Fallback (legacy): /mnt mapping.
+                    linuxExePath = WslPathMapper.TryWindowsToWslPath(testExePath, out var lex2) ? lex2 : null;
+                    linuxWorkingDir = WslPathMapper.TryWindowsToWslPath(workspaceRoot, out var lwd2) ? lwd2 : null;
+                }
+            }
+
             var testArgs = new[] { "--list", "--format", "json", "-Zunstable-options" };
 
             if (linuxExePath == null || linuxWorkingDir == null)
@@ -664,8 +711,8 @@ public sealed class ToolchainService : IToolchainService
                 throw new InvalidOperationException($"Unable to map test exe/working directory to WSL paths. Exe='{testExePath}', WorkingDir='{workspaceRoot}'.");
             }
 
-            proc = wslInfo != null
-                ? ToolchainServiceExtensions.RunInWsl(wslInfo, linuxExePath, testArgs, linuxWorkingDir, ImmutableDictionary<string, string>.Empty, ct)
+            proc = effectiveWslInfo != null
+                ? ToolchainServiceExtensions.RunInWsl(effectiveWslInfo, linuxExePath, testArgs, linuxWorkingDir, ImmutableDictionary<string, string>.Empty, ct)
                 : ToolchainServiceExtensions.RunInWsl(distroName, linuxExePath, testArgs, linuxWorkingDir, ImmutableDictionary<string, string>.Empty, ct);
         }
         else
@@ -979,38 +1026,52 @@ public sealed class ToolchainService : IToolchainService
     /// </summary>
     private static string[] ParseArgumentsForWsl(string arguments, WslInfo wslInfo, WslMirrorConfig mirrorConfig)
     {
-        // Split arguments, handling quoted strings
-        var args = new List<string>();
-        var current = new System.Text.StringBuilder();
-        var inQuotes = false;
-
-        foreach (var c in arguments)
-        {
-            if (c == '"')
-            {
-                inQuotes = !inQuotes;
-            }
-            else if (c == ' ' && !inQuotes)
-            {
-                if (current.Length > 0)
-                {
-                    args.Add(ConvertPathArgumentForWsl(current.ToString(), wslInfo, mirrorConfig));
-                    current.Clear();
-                }
-            }
-            else
-            {
-                current.Append(c);
-            }
-        }
-
-        if (current.Length > 0)
-        {
-            args.Add(ConvertPathArgumentForWsl(current.ToString(), wslInfo, mirrorConfig));
-        }
-
-        return args.ToArray();
+        // Robust tokenization (supports nested quoting / complex --config strings).
+        var rawArgs = SplitCommandLineWindows(arguments);
+        return rawArgs
+            .Where(a => !string.IsNullOrEmpty(a))
+            .Select(a => ConvertPathArgumentForWsl(a, wslInfo, mirrorConfig))
+            .ToArray();
     }
+
+    private static string[] SplitCommandLineWindows(string commandLine)
+    {
+        if (string.IsNullOrWhiteSpace(commandLine))
+        {
+            return Array.Empty<string>();
+        }
+
+        // CommandLineToArgvW implements the Windows command-line parsing rules (quotes/backslashes),
+        // which is much more correct than hand-rolled splitting for cargo's --config and similar args.
+        var argv = CommandLineToArgvW(commandLine, out var argc);
+        if (argv == IntPtr.Zero || argc <= 0)
+        {
+            // Very conservative fallback; should be rare.
+            return commandLine.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
+        }
+
+        try
+        {
+            var args = new string[argc];
+            for (var i = 0; i < argc; i++)
+            {
+                var p = Marshal.ReadIntPtr(argv, i * IntPtr.Size);
+                args[i] = Marshal.PtrToStringUni(p);
+            }
+
+            return args;
+        }
+        finally
+        {
+            LocalFree(argv);
+        }
+    }
+
+    [DllImport("shell32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    private static extern IntPtr CommandLineToArgvW(string lpCmdLine, out int pNumArgs);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern IntPtr LocalFree(IntPtr hMem);
 
     /// <summary>
     /// If an argument is a Windows path that WSL will see, convert it to a Linux path.

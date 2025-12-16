@@ -263,9 +263,13 @@ public sealed class WslMirrorInstance : IDisposable
 
     private async Task RefreshExternalRootsAsync(CancellationToken ct)
     {
-        // Discover external path deps by:
-        // 1) get workspace package manifests via `cargo metadata --no-deps`
-        // 2) parse those manifests (and recursively discovered path dep manifests) for `path = "..."`
+        // Discover external path deps.
+        //
+        // Preferred (robust): use `cargo metadata` (with deps) and collect all packages with `source == null`
+        // that resolve outside the workspace root.
+        //
+        // Fallback (best-effort): seed with `cargo metadata --no-deps` + scan manifests for `path = "..."`
+        // when full metadata is unavailable (e.g. offline resolution failures).
 
         var roots = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
@@ -312,13 +316,92 @@ public sealed class WslMirrorInstance : IDisposable
             return Array.Empty<string>();
         }
 
-        // Run cargo metadata --no-deps in WSL against /mnt/... (no mirror needed).
+        // Run cargo metadata in WSL against /mnt/... (no mirror needed).
         if (!WslPathMapper.TryWindowsToWslPath(rootManifest, out var linuxManifest) ||
             !WslPathMapper.TryWindowsToWslPath(rootManifest.GetDirectoryName(), out var linuxCwd))
         {
             return Array.Empty<string>();
         }
 
+        // Preferred: full metadata (captures all local path deps without TOML parsing).
+        try
+        {
+            var argsFull = new[] { "metadata", "--format-version", "1", "--manifest-path", linuxManifest, "--offline" };
+            using var procFull = ToolchainServiceExtensions.RunCargoInWsl(_distroName, argsFull, linuxCwd, ct);
+            var ecFull = await procFull;
+            if (ecFull == 0)
+            {
+                var jsonFull = string.Join(string.Empty, procFull.StandardOutputLines);
+                if (!string.IsNullOrWhiteSpace(jsonFull))
+                {
+                    var objFull = Newtonsoft.Json.Linq.JObject.Parse(jsonFull);
+                    if (objFull["packages"] is Newtonsoft.Json.Linq.JArray packagesFull)
+                    {
+                        var roots = new List<PathEx>();
+
+                        foreach (var p in packagesFull)
+                        {
+                            // Path/workspace crates have source == null.
+                            if ((string)p["source"] != null)
+                            {
+                                continue;
+                            }
+
+                            var mp = (string)p["manifest_path"];
+                            if (string.IsNullOrWhiteSpace(mp))
+                            {
+                                continue;
+                            }
+
+                            if (!WslPathMapper.TryWslToWindowsPath(mp, out var winMp) || string.IsNullOrWhiteSpace(winMp))
+                            {
+                                continue;
+                            }
+
+                            var dir = Path.GetDirectoryName(winMp);
+                            if (string.IsNullOrWhiteSpace(dir))
+                            {
+                                continue;
+                            }
+
+                            try
+                            {
+                                var dirEx = (PathEx)dir;
+                                if (dirEx.IsContainedIn(_workspaceRootWindows))
+                                {
+                                    continue;
+                                }
+
+                                roots.Add(dirEx);
+                            }
+                            catch
+                            {
+                                // ignore
+                            }
+                        }
+
+                        // Consolidate roots to avoid many rsyncs: if a root is contained in another root, keep only the outer root.
+                        var consolidated = new List<PathEx>();
+                        foreach (var r in roots
+                                     .OrderBy(r => ((string)r).Length))
+                        {
+                            if (!consolidated.Any(x => r.IsContainedIn(x)))
+                            {
+                                consolidated.Add(r);
+                            }
+                        }
+
+                        return consolidated.Select(x => (string)x).ToArray();
+                    }
+                }
+            }
+        }
+        catch
+        {
+            // fall back
+        }
+
+        // Fallback: use --no-deps for workspace packages, then scan manifests for `path = ...` (best-effort).
         var args = new[] { "metadata", "--no-deps", "--format-version", "1", "--manifest-path", linuxManifest, "--offline" };
         using var proc = ToolchainServiceExtensions.RunCargoInWsl(_distroName, args, linuxCwd, ct);
         var ec = await proc;
@@ -411,8 +494,44 @@ public sealed class WslMirrorInstance : IDisposable
 
     private PathEx FindAnyManifestUnderWorkspace()
     {
-        // Conservative: only check the workspace root.
-        // If no root Cargo.toml exists, we won't attempt deep scanning here.
+        // Cheap-ish scan up to 2 levels deep for Cargo.toml when workspace root is not itself a Cargo root.
+        // This avoids expensive full recursion on large repos while supporting common layouts.
+        try
+        {
+            var root = (string)_workspaceRootWindows;
+            if (string.IsNullOrWhiteSpace(root) || !Directory.Exists(root))
+            {
+                return (PathEx)string.Empty;
+            }
+
+            var direct = Path.Combine(root, Constants.ManifestFileName);
+            if (File.Exists(direct))
+            {
+                return (PathEx)direct;
+            }
+
+            foreach (var dir in Directory.EnumerateDirectories(root))
+            {
+                var p1 = Path.Combine(dir, Constants.ManifestFileName);
+                if (File.Exists(p1))
+                {
+                    return (PathEx)p1;
+                }
+
+                foreach (var dir2 in Directory.EnumerateDirectories(dir))
+                {
+                    var p2 = Path.Combine(dir2, Constants.ManifestFileName);
+                    if (File.Exists(p2))
+                    {
+                        return (PathEx)p2;
+                    }
+                }
+            }
+        }
+        catch
+        {
+        }
+
         return (PathEx)string.Empty;
     }
 
