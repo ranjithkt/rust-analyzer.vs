@@ -226,8 +226,8 @@ public sealed class DebugLaunchTargetProvider : ILaunchDebugTargetProvider
         CancellationToken ct)
     {
         // Convert Windows paths to Linux paths for WSL debugging
-        var linuxExePath = ResolveLinuxPathForDebugExe(processName, wslInfo);
-        var linuxWorkingDir = ResolveLinuxWorkingDirectory(workingDirectory, package.Parent.WorkspaceRoot, processName, wslInfo);
+        var linuxExePath = ResolveLinuxPathForDebugExe(processName, wslInfo, distroName, package.Parent.WorkspaceRoot);
+        var linuxWorkingDir = ResolveLinuxWorkingDirectory(workingDirectory, package.Parent.WorkspaceRoot, processName, wslInfo, distroName);
 
         // For WSL debugging, we use the SSH:wsl+<distro> port name
         // This tells VS to use the WSL debugging transport
@@ -256,11 +256,28 @@ public sealed class DebugLaunchTargetProvider : ILaunchDebugTargetProvider
         };
     }
 
-    private static string ResolveLinuxPathForDebugExe(PathEx exePath, WslInfo wslInfo)
+    private static string ResolveLinuxPathForDebugExe(PathEx exePath, WslInfo wslInfo, string distroName, PathEx workspaceRoot)
     {
         if (wslInfo != null)
         {
             return wslInfo.ToLinuxPath(exePath);
+        }
+
+        // Mirror mode typically stores target paths as UNC (\\wsl.localhost\Distro\...).
+        if (WslInfo.TryParse(exePath, out var parsed) && parsed != null)
+        {
+            return parsed.ToLinuxPath(exePath);
+        }
+
+        // Mode 2 mirror (Windows workspace + WSL execution): map the Windows path into the mirror if possible.
+        var wsRoot = TargetSystemSelection.TryGetWorkspaceRoot(out var wr) ? wr : workspaceRoot;
+        if (!string.IsNullOrWhiteSpace(distroName) &&
+            (string)wsRoot != null &&
+            WslMirrorManager.TryGet(wsRoot, distroName, out var mirror) &&
+            mirror?.Config != null &&
+            WslMirrorPathMapper.TryWindowsToMirrorLinuxPath((string)exePath, mirror.Config, out var mirrorLinux))
+        {
+            return mirrorLinux;
         }
 
         if (WslPathMapper.TryWindowsToWslPath(exePath, out var linuxExePath))
@@ -272,10 +289,10 @@ public sealed class DebugLaunchTargetProvider : ILaunchDebugTargetProvider
         return exePath.ToString().Replace('\\', '/');
     }
 
-    private static string ResolveLinuxWorkingDirectory(string workingDirectorySetting, PathEx workspaceRoot, PathEx exePath, WslInfo wslInfo)
+    private static string ResolveLinuxWorkingDirectory(string workingDirectorySetting, PathEx workspaceRoot, PathEx exePath, WslInfo wslInfo, string distroName)
     {
         // Default: directory of the exe
-        var fallback = ResolveLinuxPathForDebugExe(exePath.GetDirectoryName(), wslInfo);
+        var fallback = ResolveLinuxPathForDebugExe(exePath.GetDirectoryName(), wslInfo, distroName, workspaceRoot);
 
         if (workingDirectorySetting.IsNullOrEmpty())
         {
@@ -291,12 +308,33 @@ public sealed class DebugLaunchTargetProvider : ILaunchDebugTargetProvider
         // If user provided a WSL UNC path, convert it.
         if (WslInfo.IsWslPath(workingDirectorySetting))
         {
-            return wslInfo != null ? wslInfo.ToLinuxPath(workingDirectorySetting) : fallback;
+            if (wslInfo != null)
+            {
+                return wslInfo.ToLinuxPath(workingDirectorySetting);
+            }
+
+            if (WslInfo.TryParse(workingDirectorySetting, out var parsed) && parsed != null)
+            {
+                return parsed.ToLinuxPath(workingDirectorySetting);
+            }
+
+            return fallback;
         }
 
         // If user provided a Windows-rooted path (e.g. C:\...), map it for Mode 2.
         if (Path.IsPathRooted(workingDirectorySetting))
         {
+            // Prefer mirror mapping when available.
+            var wsRoot = TargetSystemSelection.TryGetWorkspaceRoot(out var wr) ? wr : workspaceRoot;
+            if (!string.IsNullOrWhiteSpace(distroName) &&
+                (string)wsRoot != null &&
+                WslMirrorManager.TryGet(wsRoot, distroName, out var mirror) &&
+                mirror?.Config != null &&
+                WslMirrorPathMapper.TryWindowsToMirrorLinuxPath(workingDirectorySetting, mirror.Config, out var mirrorLinux))
+            {
+                return mirrorLinux;
+            }
+
             return WslPathMapper.TryWindowsToWslPath(workingDirectorySetting, out var linuxPath) ? linuxPath : fallback;
         }
 
@@ -306,6 +344,17 @@ public sealed class DebugLaunchTargetProvider : ILaunchDebugTargetProvider
         if (wslInfo != null && WslInfo.IsWslPath(combined))
         {
             return wslInfo.ToLinuxPath(combined);
+        }
+
+        // Mirror mapping for relative working dirs under workspace root.
+        var wsRoot2 = TargetSystemSelection.TryGetWorkspaceRoot(out var wr2) ? wr2 : workspaceRoot;
+        if (!string.IsNullOrWhiteSpace(distroName) &&
+            (string)wsRoot2 != null &&
+            WslMirrorManager.TryGet(wsRoot2, distroName, out var mirror2) &&
+            mirror2?.Config != null &&
+            WslMirrorPathMapper.TryWindowsToMirrorLinuxPath((string)combined, mirror2.Config, out var combinedMirrorLinux))
+        {
+            return combinedMirrorLinux;
         }
 
         if (WslPathMapper.TryWindowsToWslPath(combined, out var combinedLinux))

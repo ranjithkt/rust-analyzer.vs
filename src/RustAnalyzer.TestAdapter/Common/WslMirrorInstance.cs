@@ -10,6 +10,8 @@ using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 using KS.RustAnalyzer.TestAdapter;
 using KS.RustAnalyzer.TestAdapter.Cargo;
+using Tomlyn;
+using Tomlyn.Model;
 
 namespace KS.RustAnalyzer.TestAdapter.Common;
 
@@ -35,6 +37,9 @@ public sealed class WslMirrorInstance : IDisposable
     // 0 = clean, 1 = dirty
     private int _workspaceDirty = 1;
     private int _depsDirty = 1;
+
+    // 0 = unchecked, 1 = checking, 2 = available, 3 = missing
+    private int _rsyncState;
 
     private FileSystemWatcher _workspaceWatcher;
     private readonly Dictionary<string, FileSystemWatcher> _depWatchers = new(StringComparer.OrdinalIgnoreCase);
@@ -93,13 +98,29 @@ public sealed class WslMirrorInstance : IDisposable
         var depsDirty = Interlocked.Exchange(ref _depsDirty, 0) == 1;
         if (depsDirty)
         {
-            await RefreshExternalRootsAsync(ct);
+            try
+            {
+                await RefreshExternalRootsAsync(ct);
+            }
+            catch
+            {
+                MarkDepsDirty();
+                throw;
+            }
         }
 
         var workspaceDirty = Interlocked.Exchange(ref _workspaceDirty, 0) == 1;
         if (workspaceDirty)
         {
-            await RsyncWindowsRootToMirrorAsync(_workspaceRootWindows, ct);
+            try
+            {
+                await RsyncWindowsRootToMirrorAsync(_workspaceRootWindows, ct);
+            }
+            catch
+            {
+                MarkWorkspaceDirty();
+                throw;
+            }
         }
 
         // Sync external roots (outside workspace root) only if deps were marked dirty.
@@ -115,7 +136,15 @@ public sealed class WslMirrorInstance : IDisposable
                 // If deps were dirty we resync all external roots (safe).
                 if (depsDirty)
                 {
-                    await RsyncWindowsRootToMirrorAsync((PathEx)root, ct);
+                    try
+                    {
+                        await RsyncWindowsRootToMirrorAsync((PathEx)root, ct);
+                    }
+                    catch
+                    {
+                        MarkDepsDirty();
+                        throw;
+                    }
                 }
             }
         }
@@ -614,6 +643,71 @@ public sealed class WslMirrorInstance : IDisposable
                 return results;
             }
 
+            // Preferred fallback parsing: Tomlyn (handles inline tables, dotted keys, etc.).
+            try
+            {
+                var text = File.ReadAllText(manifestPath);
+                if (!string.IsNullOrWhiteSpace(text))
+                {
+                    var model = Toml.ToModel(text) as TomlTable;
+                    if (model != null)
+                    {
+                        var rawPaths = new List<string>();
+                        CollectTomlPathValues(model, rawPaths);
+
+                        foreach (var raw in rawPaths)
+                        {
+                            if (string.IsNullOrWhiteSpace(raw))
+                            {
+                                continue;
+                            }
+
+                            // Ignore Linux absolute paths.
+                            if (raw.StartsWith("/", StringComparison.Ordinal))
+                            {
+                                continue;
+                            }
+
+                            string depDir;
+                            if (Path.IsPathRooted(raw))
+                            {
+                                depDir = raw;
+                            }
+                            else
+                            {
+                                depDir = Path.GetFullPath(Path.Combine(baseDir, raw));
+                            }
+
+                            if (File.Exists(depDir) && depDir.EndsWith(Constants.ManifestFileName, StringComparison.OrdinalIgnoreCase))
+                            {
+                                depDir = Path.GetDirectoryName(depDir);
+                            }
+
+                            if (string.IsNullOrWhiteSpace(depDir))
+                            {
+                                continue;
+                            }
+
+                            var depManifest = Path.Combine(depDir, Constants.ManifestFileName);
+                            if (File.Exists(depManifest))
+                            {
+                                results.Add(depDir);
+                            }
+                        }
+
+                        // If Tomlyn found anything, treat it as authoritative for the fallback.
+                        if (results.Count > 0)
+                        {
+                            return results;
+                        }
+                    }
+                }
+            }
+            catch
+            {
+                // Fall back to best-effort regex scan.
+            }
+
             foreach (var line in File.ReadLines(manifestPath))
             {
                 var m = TomlPathCracker.Match(line);
@@ -669,12 +763,57 @@ public sealed class WslMirrorInstance : IDisposable
         return results;
     }
 
+    private static void CollectTomlPathValues(object node, List<string> results)
+    {
+        if (node == null)
+        {
+            return;
+        }
+
+        if (node is TomlTable table)
+        {
+            foreach (var kv in table)
+            {
+                if (string.Equals(kv.Key, "path", StringComparison.OrdinalIgnoreCase) && kv.Value is string s)
+                {
+                    results.Add(s.Trim());
+                    continue;
+                }
+
+                CollectTomlPathValues(kv.Value, results);
+            }
+
+            return;
+        }
+
+        if (node is TomlArray arr)
+        {
+            foreach (var e in arr)
+            {
+                CollectTomlPathValues(e, results);
+            }
+
+            return;
+        }
+
+        // Tomlyn represents table arrays as TomlTableArray (also IEnumerable).
+        if (node is TomlTableArray ta)
+        {
+            foreach (var t in ta)
+            {
+                CollectTomlPathValues(t, results);
+            }
+        }
+    }
+
     private async Task RsyncWindowsRootToMirrorAsync(PathEx windowsRoot, CancellationToken ct)
     {
         if (Config == null)
         {
             return;
         }
+
+        await EnsureRsyncAvailableAsync(ct);
 
         var winRoot = (string)windowsRoot;
         if (string.IsNullOrWhiteSpace(winRoot) || !Directory.Exists(winRoot))
@@ -725,6 +864,53 @@ public sealed class WslMirrorInstance : IDisposable
             var output = string.Join("\n", rsync.StandardOutputLines.Concat(rsync.StandardErrorLines));
             throw new InvalidOperationException($"rsync failed with exit code {ec}. Output:\n{output}");
         }
+    }
+
+    private async Task EnsureRsyncAvailableAsync(CancellationToken ct)
+    {
+        var state = Volatile.Read(ref _rsyncState);
+        if (state == 2)
+        {
+            return;
+        }
+
+        if (state == 3)
+        {
+            throw new InvalidOperationException(GetRsyncMissingMessage());
+        }
+
+        if (Interlocked.CompareExchange(ref _rsyncState, 1, 0) == 0)
+        {
+            try
+            {
+                using var probe = ToolchainServiceExtensions.RunInWsl(_distroName, "rsync", new[] { "--version" }, linuxWorkingDir: null, env: null, ct);
+                var ec = await probe;
+                Volatile.Write(ref _rsyncState, ec == 0 ? 2 : 3);
+            }
+            catch
+            {
+                Volatile.Write(ref _rsyncState, 3);
+            }
+        }
+        else
+        {
+            var sw = new SpinWait();
+            while ((state = Volatile.Read(ref _rsyncState)) == 1)
+            {
+                sw.SpinOnce();
+            }
+        }
+
+        if (Volatile.Read(ref _rsyncState) != 2)
+        {
+            throw new InvalidOperationException(GetRsyncMissingMessage());
+        }
+    }
+
+    private string GetRsyncMissingMessage()
+    {
+        return $"WSL Mirror Sync requires 'rsync' to be installed in the WSL distro '{_distroName}'. " +
+               "Install it inside WSL, e.g. 'sudo apt update && sudo apt install rsync'.";
     }
 
     private static string LinuxPathToUnc(string distroName, string linuxAbsPath)
