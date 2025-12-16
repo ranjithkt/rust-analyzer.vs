@@ -64,7 +64,6 @@ public sealed class WslMirrorConfig
     /// </summary>
     public string[] ExcludedDirectoryNames { get; set; } = new[]
     {
-        ".git",
         ".vs",
         "target",
     };

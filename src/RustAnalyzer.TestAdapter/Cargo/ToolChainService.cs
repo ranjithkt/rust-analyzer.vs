@@ -497,6 +497,7 @@ public sealed class ToolchainService : IToolchainService
                 var regex = isWsl ? TestExecutablePathCrackerWsl : TestExecutablePathCracker;
                 var testExeBuildInfos = proc.StandardErrorLines
                     .Select(l => regex.Matches(l))
+
                     // Both regexes are expected to produce 5 groups total:
                     // [0]=full match, [1]=optional " unittests", [2]=src, [3]=full exe path, [4]=exe name.
                     // Guard against unexpected output/regex changes.
@@ -1022,7 +1023,7 @@ public sealed class ToolchainService : IToolchainService
     /// <summary>
     /// Parses cargo arguments and converts any Windows paths to the correct Linux paths for WSL.
     /// - Mode 1: UNC workspace -> direct UNC-to-Linux mapping
-    /// - Mode 2: Windows workspace -> mirror Linux paths (not /mnt)
+    /// - Mode 2: Windows workspace -> mirror Linux paths (not /mnt).
     /// </summary>
     private static string[] ParseArgumentsForWsl(string arguments, WslInfo wslInfo, WslMirrorConfig mirrorConfig)
     {

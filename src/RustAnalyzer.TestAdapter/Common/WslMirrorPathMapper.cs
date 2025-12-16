@@ -9,12 +9,12 @@ namespace KS.RustAnalyzer.TestAdapter.Common;
 /// Mirror layout:
 ///   &lt;MirrorWindowsRootLinux&gt;/&lt;drive&gt;/&lt;path...&gt;
 /// Example:
-///   C:\Repos\proj\src\main.rs -> /home/u/.cache/rust-analyzer.vs/mirrors/&lt;id&gt;/win/c/Repos/proj/src/main.rs
+///   C:\Repos\proj\src\main.rs -> /home/u/.cache/rust-analyzer.vs/mirrors/&lt;id&gt;/win/c/Repos/proj/src/main.rs.
 /// </summary>
 public static class WslMirrorPathMapper
 {
-    private static readonly Regex WindowsDrivePath = new(@"^(?<drive>[a-zA-Z]):[\\/](?<rest>.*)$", RegexOptions.Compiled);
     private const string WinSentinel = "/win/";
+    private static readonly Regex WindowsDrivePath = new(@"^(?<drive>[a-zA-Z]):[\\/](?<rest>.*)$", RegexOptions.Compiled);
 
     public static bool TryWindowsToMirrorLinuxPath(string windowsPath, WslMirrorConfig cfg, out string mirrorLinuxPath)
     {
@@ -30,6 +30,18 @@ public static class WslMirrorPathMapper
             return false;
         }
 
+        // Support Windows extended-length paths (\\?\C:\...) by stripping the prefix for drive mapping.
+        // Also normalize \\?\UNC\server\share\... -> \\server\share\...
+        windowsPath = windowsPath.Trim();
+        if (windowsPath.StartsWith(@"\\?\UNC\", StringComparison.OrdinalIgnoreCase))
+        {
+            windowsPath = @"\\" + windowsPath.Substring(@"\\?\UNC\".Length);
+        }
+        else if (windowsPath.StartsWith(@"\\?\", StringComparison.OrdinalIgnoreCase) && windowsPath.Length > 4)
+        {
+            windowsPath = windowsPath.Substring(4);
+        }
+
         // This mapper is Windows -> mirror Linux. If the input is already Linux, treat as not-a-Windows-path.
         if (windowsPath.StartsWith("/", StringComparison.Ordinal))
         {
@@ -39,11 +51,10 @@ public static class WslMirrorPathMapper
         // If this is a WSL UNC path, keep it as-is (caller should convert via WslInfo instead).
         if (WslInfo.IsWslPath(windowsPath))
         {
-            mirrorLinuxPath = windowsPath;
             return false;
         }
 
-        var normalizedWindowsPath = windowsPath.Trim();
+        var normalizedWindowsPath = windowsPath;
         try
         {
             // Normalize separators and ".." segments so mirror paths are stable even if callers vary.
@@ -121,6 +132,41 @@ public static class WslMirrorPathMapper
         if (idx < 0)
         {
             return false;
+        }
+
+        // Tighten the heuristic: only accept paths that look like our default mirror layout:
+        //   .../mirrors/<workspaceId>/win/<drive>/...
+        // This avoids false positives for arbitrary "/home/me/win/c/..." folders.
+        const string mirrorsSeg = "/mirrors/";
+        var idxMirrors = normalized.LastIndexOf(mirrorsSeg, idx, StringComparison.Ordinal);
+        if (idxMirrors < 0)
+        {
+            return false;
+        }
+
+        var idStart = idxMirrors + mirrorsSeg.Length;
+        var idEnd = normalized.IndexOf('/', idStart);
+        if (idEnd != idx)
+        {
+            return false;
+        }
+
+        // Expect a 32-hex workspace id segment.
+        if (idEnd - idStart != 32)
+        {
+            return false;
+        }
+
+        for (var i = idStart; i < idEnd; i++)
+        {
+            var c = normalized[i];
+            var isHex = (c >= '0' && c <= '9') ||
+                        (c >= 'a' && c <= 'f') ||
+                        (c >= 'A' && c <= 'F');
+            if (!isHex)
+            {
+                return false;
+            }
         }
 
         var suffix = normalized.Substring(idx + WinSentinel.Length);

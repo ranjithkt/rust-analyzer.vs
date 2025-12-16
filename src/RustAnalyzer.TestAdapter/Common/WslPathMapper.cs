@@ -10,6 +10,7 @@ namespace KS.RustAnalyzer.TestAdapter.Common;
 public static class WslPathMapper
 {
     private static readonly Regex WindowsDrivePath = new(@"^(?<drive>[a-zA-Z]):[\\/](?<rest>.*)$", RegexOptions.Compiled);
+
     // Support "/mnt/c", "/mnt/c/", and "/mnt/c/foo/bar"
     private static readonly Regex WslMntPath = new(@"^/mnt/(?<drive>[a-zA-Z])(?:/(?<rest>.*))?$", RegexOptions.Compiled);
 
@@ -21,11 +22,24 @@ public static class WslPathMapper
             return false;
         }
 
+        windowsPath = windowsPath.Trim();
+
         // Already looks like a Linux path.
         if (windowsPath.StartsWith("/", StringComparison.Ordinal))
         {
             linuxPath = windowsPath;
             return true;
+        }
+
+        // Support Windows extended-length paths (\\?\C:\...) by stripping the prefix for drive mapping.
+        // Also normalize \\?\UNC\server\share\... -> \\server\share\...
+        if (windowsPath.StartsWith(@"\\?\UNC\", StringComparison.OrdinalIgnoreCase))
+        {
+            windowsPath = @"\\" + windowsPath.Substring(@"\\?\UNC\".Length);
+        }
+        else if (windowsPath.StartsWith(@"\\?\", StringComparison.OrdinalIgnoreCase) && windowsPath.Length > 4)
+        {
+            windowsPath = windowsPath.Substring(4);
         }
 
         // UNC WSL path: delegate to WslInfo for Mode 1.
@@ -35,7 +49,7 @@ public static class WslPathMapper
             return true;
         }
 
-        var m = WindowsDrivePath.Match(windowsPath.Trim());
+        var m = WindowsDrivePath.Match(windowsPath);
         if (!m.Success)
         {
             return false;

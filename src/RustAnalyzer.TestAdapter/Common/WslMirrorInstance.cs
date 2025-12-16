@@ -4,11 +4,10 @@ using System.Collections.Immutable;
 using System.IO;
 using System.Linq;
 using System.Security.Cryptography;
-using System.Threading;
 using System.Text;
 using System.Text.RegularExpressions;
+using System.Threading;
 using System.Threading.Tasks;
-using KS.RustAnalyzer.TestAdapter;
 using KS.RustAnalyzer.TestAdapter.Cargo;
 using Tomlyn;
 using Tomlyn.Model;
@@ -27,8 +26,13 @@ public sealed class WslMirrorInstance : IDisposable
     private readonly PathEx _workspaceRootWindows;
     private readonly string _distroName;
 
-    private readonly SemaphoreSlim _initLock = new(1, 1);
     private readonly object _watcherLock = new();
+    private readonly SemaphoreSlim _initLock = new(1, 1);
+    private readonly SemaphoreSlim _syncLock = new(1, 1);
+
+    private readonly SemaphoreSlim _rsyncProbeLock = new(1, 1);
+    private readonly Dictionary<string, FileSystemWatcher> _depWatchers = new(StringComparer.OrdinalIgnoreCase);
+    private readonly HashSet<string> _externalRootsDirty = new(StringComparer.OrdinalIgnoreCase);
 
     private bool _initialized;
     private int _disposed;
@@ -36,14 +40,21 @@ public sealed class WslMirrorInstance : IDisposable
     // Dirty flags: use Interlocked to avoid lost updates between watcher threads and sync thread.
     // 0 = clean, 1 = dirty
     private int _workspaceDirty = 1;
-    private int _depsDirty = 1;
+
+    // Dependency graph dirty: manifests / lock files changed; requires re-discovery of external roots.
+    private int _depsGraphDirty = 1;
+
+    // Dependency content dirty: files changed under one or more external roots; requires rsync only.
+    private int _depsContentDirty = 1;
+
+    // Watchers can overflow; when they do, recreate them on the next sync.
+    private int _watchersNeedRecreate;
 
     // 0 = unchecked, 1 = checking, 2 = available, 3 = missing
     private int _rsyncState;
+    private long _rsyncLastCheckUtcTicks;
 
     private FileSystemWatcher _workspaceWatcher;
-    private readonly Dictionary<string, FileSystemWatcher> _depWatchers = new(StringComparer.OrdinalIgnoreCase);
-
     private HashSet<string> _externalRoots = new(StringComparer.OrdinalIgnoreCase);
 
     public WslMirrorInstance(PathEx workspaceRootWindows, string distroName)
@@ -80,9 +91,14 @@ public sealed class WslMirrorInstance : IDisposable
             EnsureWorkspaceWatcher();
             await RefreshExternalRootsAsync(ct);
 
+            // We just refreshed the dep graph; avoid re-running discovery on the first sync.
+            Interlocked.Exchange(ref _depsGraphDirty, 0);
+
+            // But do ensure all discovered external roots get synced at least once.
+            MarkDepsContentDirtyAll();
+
             // Do not eagerly rsync here; keep init lightweight.
             // First actual tool invocation will call EnsureSynchronizedAsync which will rsync as needed.
-
             _initialized = true;
         }
         finally
@@ -95,59 +111,129 @@ public sealed class WslMirrorInstance : IDisposable
     {
         await EnsureInitializedAsync(ct);
 
-        var depsDirty = Interlocked.Exchange(ref _depsDirty, 0) == 1;
-        if (depsDirty)
+        // Multiple VS operations can trigger WSL tool invocations concurrently (build + test discovery + debug, etc.).
+        // Serialize all sync work per instance to avoid concurrent rsync into the same destination.
+        await _syncLock.WaitAsync(ct);
+        try
         {
-            try
+            if (Interlocked.Exchange(ref _watchersNeedRecreate, 0) == 1)
             {
-                await RefreshExternalRootsAsync(ct);
-            }
-            catch
-            {
-                MarkDepsDirty();
-                throw;
-            }
-        }
-
-        var workspaceDirty = Interlocked.Exchange(ref _workspaceDirty, 0) == 1;
-        if (workspaceDirty)
-        {
-            try
-            {
-                await RsyncWindowsRootToMirrorAsync(_workspaceRootWindows, ct);
-            }
-            catch
-            {
-                MarkWorkspaceDirty();
-                throw;
-            }
-        }
-
-        // Sync external roots (outside workspace root) only if deps were marked dirty.
-        if (_externalRoots.Count > 0)
-        {
-            foreach (var root in _externalRoots.ToArray())
-            {
-                if (ct.IsCancellationRequested)
+                // After an overflow, assume the watcher may have lost events; we already marked dirty in Error handlers.
+                // Recreate watchers so we continue to get events reliably going forward.
+                try
                 {
-                    ct.ThrowIfCancellationRequested();
+                    RecreateWatchers();
                 }
-
-                // If deps were dirty we resync all external roots (safe).
-                if (depsDirty)
+                catch
                 {
-                    try
-                    {
-                        await RsyncWindowsRootToMirrorAsync((PathEx)root, ct);
-                    }
-                    catch
-                    {
-                        MarkDepsDirty();
-                        throw;
-                    }
+                    // Best-effort.
                 }
             }
+
+            var depsGraphDirty = Interlocked.Exchange(ref _depsGraphDirty, 0) == 1;
+            var depsContentDirty = Interlocked.Exchange(ref _depsContentDirty, 0) == 1;
+            var workspaceDirty = Interlocked.Exchange(ref _workspaceDirty, 0) == 1;
+
+            if (depsGraphDirty)
+            {
+                try
+                {
+                    await RefreshExternalRootsAsync(ct);
+                }
+                catch
+                {
+                    MarkDepsGraphDirty();
+                    throw;
+                }
+            }
+
+            if (workspaceDirty)
+            {
+                try
+                {
+                    await RsyncWindowsRootToMirrorAsync(_workspaceRootWindows, ct);
+                }
+                catch
+                {
+                    MarkWorkspaceDirty();
+                    throw;
+                }
+            }
+
+            // External roots:
+            // - graph dirty => sync all roots once (new roots may exist)
+            // - content dirty => sync only roots that were dirtied
+            if (depsGraphDirty || depsContentDirty)
+            {
+                string[] rootsToSync;
+                lock (_watcherLock)
+                {
+                    rootsToSync = depsGraphDirty ? _externalRoots.ToArray() : _externalRootsDirty.ToArray();
+                }
+
+                if (rootsToSync.Length > 0)
+                {
+                    foreach (var root in rootsToSync)
+                    {
+                        ct.ThrowIfCancellationRequested();
+
+                        try
+                        {
+                            await RsyncWindowsRootToMirrorAsync((PathEx)root, ct);
+                            lock (_watcherLock)
+                            {
+                                _externalRootsDirty.Remove(root);
+                            }
+                        }
+                        catch
+                        {
+                            MarkDepsContentDirty(root);
+                            throw;
+                        }
+                    }
+                }
+            }
         }
+        finally
+        {
+            _syncLock.Release();
+        }
+    }
+
+    public void Dispose()
+    {
+        if (Interlocked.Exchange(ref _disposed, 1) == 1)
+        {
+            return;
+        }
+
+        try
+        {
+            _workspaceWatcher?.Dispose();
+        }
+        catch
+        {
+        }
+
+        lock (_watcherLock)
+        {
+            foreach (var w in _depWatchers.Values)
+            {
+                try
+                {
+                    w.Dispose();
+                }
+                catch
+                {
+                }
+            }
+
+            _depWatchers.Clear();
+        }
+
+        _initLock.Dispose();
+        _syncLock.Dispose();
+        _rsyncProbeLock.Dispose();
     }
 
     private void EnsureWorkspaceWatcher()
@@ -169,7 +255,6 @@ public sealed class WslMirrorInstance : IDisposable
             NotifyFilter = NotifyFilters.FileName | NotifyFilters.DirectoryName | NotifyFilters.LastWrite | NotifyFilters.Size,
             Filter = "*.*",
             InternalBufferSize = 64 * 1024,
-            EnableRaisingEvents = true,
         };
 
         w.Changed += (_, e) => OnAnyWorkspaceChanged(e.FullPath);
@@ -179,7 +264,9 @@ public sealed class WslMirrorInstance : IDisposable
         w.Error += (_, __) =>
         {
             MarkWorkspaceDirty();
-            MarkDepsDirty();
+            MarkDepsGraphDirty();
+            MarkDepsContentDirtyAll();
+            Interlocked.Exchange(ref _watchersNeedRecreate, 1);
 
             try
             {
@@ -190,6 +277,8 @@ public sealed class WslMirrorInstance : IDisposable
             }
         };
 
+        // Attach handlers before enabling events to avoid missing a change window at startup.
+        w.EnableRaisingEvents = true;
         _workspaceWatcher = w;
     }
 
@@ -213,7 +302,6 @@ public sealed class WslMirrorInstance : IDisposable
                 NotifyFilter = NotifyFilters.FileName | NotifyFilters.DirectoryName | NotifyFilters.LastWrite | NotifyFilters.Size,
                 Filter = "*.*",
                 InternalBufferSize = 64 * 1024,
-                EnableRaisingEvents = true,
             };
 
             w.Changed += (_, e) => OnAnyDepChanged(root, e.FullPath);
@@ -222,7 +310,8 @@ public sealed class WslMirrorInstance : IDisposable
             w.Renamed += (_, e) => OnAnyDepChanged(root, e.FullPath);
             w.Error += (_, __) =>
             {
-                MarkDepsDirty();
+                MarkDepsContentDirty(root);
+                Interlocked.Exchange(ref _watchersNeedRecreate, 1);
 
                 try
                 {
@@ -233,7 +322,47 @@ public sealed class WslMirrorInstance : IDisposable
                 }
             };
 
+            // Attach handlers before enabling events to avoid missing a change window at startup.
+            w.EnableRaisingEvents = true;
             _depWatchers[root] = w;
+        }
+    }
+
+    private void RecreateWatchers()
+    {
+        string[] roots;
+        lock (_watcherLock)
+        {
+            roots = _externalRoots.ToArray();
+
+            try
+            {
+                _workspaceWatcher?.Dispose();
+            }
+            catch
+            {
+            }
+
+            _workspaceWatcher = null;
+
+            foreach (var kv in _depWatchers.Values)
+            {
+                try
+                {
+                    kv.Dispose();
+                }
+                catch
+                {
+                }
+            }
+
+            _depWatchers.Clear();
+        }
+
+        EnsureWorkspaceWatcher();
+        foreach (var r in roots)
+        {
+            EnsureDepWatcher(r);
         }
     }
 
@@ -248,7 +377,7 @@ public sealed class WslMirrorInstance : IDisposable
 
         if (IsManifestOrLock(fullPath))
         {
-            MarkDepsDirty();
+            MarkDepsGraphDirty();
         }
     }
 
@@ -259,11 +388,11 @@ public sealed class WslMirrorInstance : IDisposable
             return;
         }
 
-        MarkDepsDirty();
+        MarkDepsContentDirty(root);
 
         if (IsManifestOrLock(fullPath))
         {
-            MarkDepsDirty();
+            MarkDepsGraphDirty();
         }
     }
 
@@ -272,9 +401,42 @@ public sealed class WslMirrorInstance : IDisposable
         Interlocked.Exchange(ref _workspaceDirty, 1);
     }
 
+    private void MarkDepsGraphDirty()
+    {
+        Interlocked.Exchange(ref _depsGraphDirty, 1);
+    }
+
+    private void MarkDepsContentDirty(string root)
+    {
+        Interlocked.Exchange(ref _depsContentDirty, 1);
+        if (string.IsNullOrWhiteSpace(root))
+        {
+            return;
+        }
+
+        lock (_watcherLock)
+        {
+            _externalRootsDirty.Add(root);
+        }
+    }
+
+    private void MarkDepsContentDirtyAll()
+    {
+        Interlocked.Exchange(ref _depsContentDirty, 1);
+        lock (_watcherLock)
+        {
+            foreach (var r in _externalRoots)
+            {
+                _externalRootsDirty.Add(r);
+            }
+        }
+    }
+
+    // Back-compat helper: graph + content dirty.
     private void MarkDepsDirty()
     {
-        Interlocked.Exchange(ref _depsDirty, 1);
+        MarkDepsGraphDirty();
+        MarkDepsContentDirtyAll();
     }
 
     private bool ShouldIgnore(string fullPath)
@@ -366,7 +528,6 @@ public sealed class WslMirrorInstance : IDisposable
         //
         // Fallback (best-effort): seed with `cargo metadata --no-deps` + scan manifests for `path = "..."`
         // when full metadata is unavailable (e.g. offline resolution failures).
-
         var roots = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
         foreach (var r in await DiscoverExternalPathDependencyRootsAsync(ct))
@@ -400,7 +561,18 @@ public sealed class WslMirrorInstance : IDisposable
             }
         }
 
-        _externalRoots = roots;
+        lock (_watcherLock)
+        {
+            _externalRoots = roots;
+            try
+            {
+                _externalRootsDirty.RemoveWhere(r => !_externalRoots.Contains(r));
+            }
+            catch
+            {
+                // best-effort
+            }
+        }
     }
 
     private async Task<IEnumerable<string>> DiscoverExternalPathDependencyRootsAsync(CancellationToken ct)
@@ -874,31 +1046,44 @@ public sealed class WslMirrorInstance : IDisposable
             return;
         }
 
+        // If we previously failed, allow periodic retries: WSL can be temporarily unavailable (or mid-upgrade).
         if (state == 3)
         {
-            throw new InvalidOperationException(GetRsyncMissingMessage());
+            var now = DateTime.UtcNow.Ticks;
+            var last = Volatile.Read(ref _rsyncLastCheckUtcTicks);
+            if (last != 0 && (now - last) < TimeSpan.FromSeconds(30).Ticks)
+            {
+                throw new InvalidOperationException(GetRsyncMissingMessage());
+            }
+
+            Interlocked.CompareExchange(ref _rsyncState, 0, 3);
         }
 
-        if (Interlocked.CompareExchange(ref _rsyncState, 1, 0) == 0)
+        await _rsyncProbeLock.WaitAsync(ct);
+        try
         {
+            state = Volatile.Read(ref _rsyncState);
+            if (state == 2)
+            {
+                return;
+            }
+
             try
             {
                 using var probe = ToolchainServiceExtensions.RunInWsl(_distroName, "rsync", new[] { "--version" }, linuxWorkingDir: null, env: null, ct);
                 var ec = await probe;
+                Volatile.Write(ref _rsyncLastCheckUtcTicks, DateTime.UtcNow.Ticks);
                 Volatile.Write(ref _rsyncState, ec == 0 ? 2 : 3);
             }
             catch
             {
+                Volatile.Write(ref _rsyncLastCheckUtcTicks, DateTime.UtcNow.Ticks);
                 Volatile.Write(ref _rsyncState, 3);
             }
         }
-        else
+        finally
         {
-            var sw = new SpinWait();
-            while ((state = Volatile.Read(ref _rsyncState)) == 1)
-            {
-                sw.SpinOnce();
-            }
+            _rsyncProbeLock.Release();
         }
 
         if (Volatile.Read(ref _rsyncState) != 2)
@@ -939,6 +1124,7 @@ public sealed class WslMirrorInstance : IDisposable
     private static async Task<string> GetLinuxHomeAsync(string distroName, CancellationToken ct)
     {
         var wslExe = WslInfo.GetWslExePath();
+
         // Use printf to avoid trailing newline.
         var args = new[] { "-d", distroName, "--exec", "/bin/bash", "-lc", "printf %s \"$HOME\"" };
         using var proc = ProcessRunner.Run(wslExe, args, Environment.SystemDirectory, ImmutableDictionary<string, string>.Empty, ct);
@@ -968,6 +1154,7 @@ public sealed class WslMirrorInstance : IDisposable
         var input = (((string)workspaceRootWindows.GetFullPath()) + "|" + (distroName ?? string.Empty)).ToLowerInvariant();
         using var sha = SHA256.Create();
         var bytes = sha.ComputeHash(Encoding.UTF8.GetBytes(input));
+
         // 16 bytes hex is enough and keeps paths short.
         var sb = new StringBuilder(32);
         for (int i = 0; i < 16 && i < bytes.Length; i++)
@@ -976,27 +1163,5 @@ public sealed class WslMirrorInstance : IDisposable
         }
 
         return sb.ToString();
-    }
-
-    public void Dispose()
-    {
-        if (Interlocked.Exchange(ref _disposed, 1) == 1)
-        {
-            return;
-        }
-
-        try { _workspaceWatcher?.Dispose(); } catch { }
-
-        lock (_watcherLock)
-        {
-            foreach (var w in _depWatchers.Values)
-            {
-                try { w.Dispose(); } catch { }
-            }
-
-            _depWatchers.Clear();
-        }
-
-        _initLock.Dispose();
     }
 }

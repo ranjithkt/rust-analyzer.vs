@@ -122,7 +122,13 @@ public static class WslMirrorManager
             if (key.StartsWith(prefix, StringComparison.OrdinalIgnoreCase) &&
                 Instances.TryRemove(key, out var inst))
             {
-                try { inst.Dispose(); } catch { }
+                try
+                {
+                    inst.Dispose();
+                }
+                catch
+                {
+                }
             }
         }
     }
