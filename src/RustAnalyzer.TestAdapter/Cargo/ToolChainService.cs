@@ -960,18 +960,38 @@ public sealed class ToolchainService : IToolchainService
         }
         else
         {
-            var mirror = WslMirrorManager.GetOrCreate(workspaceRoot, distroName);
-            await mirror.EnsureSynchronizedAsync(ct);
-            mirrorConfig = mirror.Config;
+            // IMPORTANT:
+            // Some cargo operations *modify source files* (e.g. `cargo fmt`) and must therefore run
+            // against the real Windows workspace (via /mnt) so changes apply to the user's files.
+            // Mirror mode is safe for operations that are read-only w.r.t the source tree (build/test/clippy),
+            // and is required to avoid the /mnt "rebuild every time" issue.
+            var useMirror = !IsSourceMutatingCargoOperation(opName);
 
-            // Working dir must be inside mirror.
-            if (mirrorConfig != null && WslMirrorPathMapper.TryWindowsToMirrorLinuxPath((string)workingDir, mirrorConfig, out var mirrorWd))
+            if (useMirror)
             {
-                linuxWorkingDir = mirrorWd;
+                var mirror = WslMirrorManager.GetOrCreate(workspaceRoot, distroName);
+                await mirror.EnsureSynchronizedAsync(ct);
+                mirrorConfig = mirror.Config;
+
+                // Working dir must be inside mirror.
+                if (mirrorConfig != null && WslMirrorPathMapper.TryWindowsToMirrorLinuxPath((string)workingDir, mirrorConfig, out var mirrorWd))
+                {
+                    linuxWorkingDir = mirrorWd;
+                }
+                else if (!WslPathMapper.TryWindowsToWslPath(workingDir, out linuxWorkingDir))
+                {
+                    // Fallback (legacy): /mnt mapping.
+                    throw new InvalidOperationException($"Unable to map working directory '{workingDir}' to a WSL path.").AddExitCode(-1);
+                }
             }
-            else if (!WslPathMapper.TryWindowsToWslPath(workingDir, out linuxWorkingDir))
+            else
             {
-                throw new InvalidOperationException($"Unable to map working directory '{workingDir}' to a WSL path.").AddExitCode(-1);
+                // Source-mutating operation (e.g. fmt): run in WSL but target the Windows tree via /mnt.
+                mirrorConfig = null;
+                if (!WslPathMapper.TryWindowsToWslPath(workingDir, out linuxWorkingDir))
+                {
+                    throw new InvalidOperationException($"Unable to map working directory '{workingDir}' to a WSL path.").AddExitCode(-1);
+                }
             }
         }
 
@@ -1017,7 +1037,96 @@ public sealed class ToolchainService : IToolchainService
         process.Wait();
 
         redirector?.WriteLineWithoutProcessing("==== Build step (WSL): Finished ====\n");
+
+        // Best-effort: keep Windows source tree in sync for files cargo may mutate during mirror runs.
+        // The most important one is Cargo.lock (cargo can update it during build/test/clippy).
+        //
+        // If we don't sync it back, subsequent mirror syncs may overwrite it from Windows again and cargo will
+        // rewrite it repeatedly, which can look like "rebuilds every time" even when the user made no changes.
+        if (process.ExitCode == 0 &&
+            wslInfo == null &&
+            mirrorConfig != null &&
+            ShouldSyncBackCargoLock(opName))
+        {
+            TrySyncBackCargoLock(workspaceRoot, distroName, mirrorConfig, redirector);
+        }
+
         return process.ExitCode == 0;
+    }
+
+    private static bool IsSourceMutatingCargoOperation(string opName)
+    {
+        // `cargo fmt` rewrites files in-place. In mirror mode that would only change the mirror,
+        // not the actual Windows workspace the user is editing.
+        return string.Equals(opName, "fmt", StringComparison.OrdinalIgnoreCase) ||
+               string.Equals(opName, "Fmt", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool ShouldSyncBackCargoLock(string opName)
+    {
+        // cargo can update Cargo.lock during many commands. Keep this conservative but useful.
+        return string.Equals(opName, "build", StringComparison.OrdinalIgnoreCase) ||
+               string.Equals(opName, "clippy", StringComparison.OrdinalIgnoreCase) ||
+               string.Equals(opName, "Clippy", StringComparison.OrdinalIgnoreCase) ||
+               string.Equals(opName, "test", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static void TrySyncBackCargoLock(PathEx workspaceRootWindows, string distroName, WslMirrorConfig cfg, ProcessOutputRedirector redirector)
+    {
+        try
+        {
+            if (cfg == null || string.IsNullOrWhiteSpace(cfg.MirrorWorkspaceRootLinux))
+            {
+                return;
+            }
+
+            var wsRoot = (string)workspaceRootWindows.GetFullPath();
+            if (string.IsNullOrWhiteSpace(wsRoot))
+            {
+                return;
+            }
+
+            // Build mirror lock path (Linux) and map it to UNC so Windows can read it.
+            var linuxLock = cfg.MirrorWorkspaceRootLinux.TrimEnd('/') + "/Cargo.lock";
+            var uncRoot = $"\\\\wsl.localhost\\{distroName}\\";
+            if (!WslInfo.TryParse(uncRoot, out var info) || info == null)
+            {
+                return;
+            }
+
+            var uncLock = info.ToUncPath(linuxLock);
+            if (!File.Exists(uncLock))
+            {
+                return;
+            }
+
+            var winLock = Path.Combine(wsRoot, "Cargo.lock");
+
+            // Copy only if content differs (avoid needless mtime bumps).
+            var srcBytes = File.ReadAllBytes(uncLock);
+            if (File.Exists(winLock))
+            {
+                var dstBytes = File.ReadAllBytes(winLock);
+                if (dstBytes.Length == srcBytes.Length && dstBytes.SequenceEqual(srcBytes))
+                {
+                    return;
+                }
+            }
+
+            File.WriteAllBytes(winLock, srcBytes);
+            redirector?.WriteLineWithoutProcessing($"(WSL) Updated '{winLock}' from mirror Cargo.lock.");
+        }
+        catch (Exception ex)
+        {
+            // Best-effort: never fail the build because of sync-back.
+            try
+            {
+                redirector?.WriteLineWithoutProcessing($"(WSL) Note: failed to sync back Cargo.lock from mirror. {ex.Message}");
+            }
+            catch
+            {
+            }
+        }
     }
 
     /// <summary>
