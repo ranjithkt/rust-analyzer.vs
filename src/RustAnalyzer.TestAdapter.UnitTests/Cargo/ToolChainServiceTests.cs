@@ -28,7 +28,7 @@ public sealed class ToolchainServiceTests
         NamerFactory.AdditionalInformation = workspaceRelRoot.ReplaceInvalidChars();
         var manifestPath = TestHelpers.ThisTestRoot.Combine((PathEx)workspaceRelRoot, Constants.ManifestFileName2);
 
-        var wmd = await _tcs.GetWorkspaceAsync(manifestPath, default);
+        var wmd = await _tcs.GetWorkspaceAsync(manifestPath, manifestPath.GetDirectoryName(), default);
 
         var normalizedStr = wmd.SerializeAndNormalizeObject();
         Approvals.Verify(normalizedStr);
@@ -43,7 +43,7 @@ public sealed class ToolchainServiceTests
     {
         var manifestPath = TestHelpers.ThisTestRoot.Combine((PathEx)workspaceRelRoot, Constants.ManifestFileName2);
 
-        var wmd = await _tcs.GetWorkspaceAsync(manifestPath, default);
+        var wmd = await _tcs.GetWorkspaceAsync(manifestPath, manifestPath.GetDirectoryName(), default);
         var targetParents = wmd.Packages.Select(p => (p, tp: p.Targets.Select(t => t.Parent)));
 
         wmd.Packages.Should().OnlyContain(p => p.Parent == wmd);
@@ -59,7 +59,7 @@ public sealed class ToolchainServiceTests
     {
         var manifestPath = TestHelpers.ThisTestRoot.Combine((PathEx)workspaceRelRoot, Constants.ManifestFileName2);
 
-        var wmd = await _tcs.GetWorkspaceAsync(manifestPath, default);
+        var wmd = await _tcs.GetWorkspaceAsync(manifestPath, manifestPath.GetDirectoryName(), default);
 
         wmd.Packages.Should().NotContain(p => p.Name == Workspace.Package.RootPackageName || !p.IsPackage);
         wmd.Packages.Should().OnlyContain(p => p.IsPackage);
@@ -72,7 +72,7 @@ public sealed class ToolchainServiceTests
     {
         var manifestPath = TestHelpers.ThisTestRoot.Combine((PathEx)workspaceRelRoot, Constants.ManifestFileName2);
 
-        var wmd = await _tcs.GetWorkspaceAsync(manifestPath, default);
+        var wmd = await _tcs.GetWorkspaceAsync(manifestPath, manifestPath.GetDirectoryName(), default);
 
         wmd.Packages.Should().ContainSingle(p => p.Name == Workspace.Package.RootPackageName && !p.IsPackage);
     }

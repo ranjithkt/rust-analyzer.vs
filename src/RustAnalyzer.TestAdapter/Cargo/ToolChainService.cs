@@ -53,6 +53,7 @@ public sealed class ToolchainService : IToolchainService
 
         var success = await ExecuteOperationAsync(
             "build",
+            bti.WorkspaceRoot,
             bti.ManifestPath,
             arguments: $"build --manifest-path \"{bti.ManifestPath}\" {packageArg} --profile {bti.Profile} --message-format json {bti.AdditionalBuildArgs}",
             profile: bti.Profile,
@@ -65,7 +66,7 @@ public sealed class ToolchainService : IToolchainService
 
         if (success)
         {
-            var w = await GetWorkspaceAsync(bti.ManifestPath, ct);
+            var w = await GetWorkspaceAsync(bti.ManifestPath, bti.WorkspaceRoot, ct);
 
             // IMPORTANT:
             // Do NOT rewrite all *.rusttests files on every build.
@@ -101,6 +102,7 @@ public sealed class ToolchainService : IToolchainService
         var packageArg = TryGetPackageArgForManifest(bti.ManifestPath);
         return ExecuteOperationAsync(
             "clean",
+            bti.WorkspaceRoot,
             bti.ManifestPath,
             arguments: $"clean --manifest-path \"{bti.ManifestPath}\" {packageArg} --profile {bti.Profile}",
             profile: bti.Profile,
@@ -117,6 +119,7 @@ public sealed class ToolchainService : IToolchainService
         var packageArg = TryGetPackageArgForManifest(bti.ManifestPath);
         return ExecuteOperationAsync(
             "Clippy",
+            bti.WorkspaceRoot,
             bti.ManifestPath,
             arguments: $"clippy --manifest-path \"{bti.ManifestPath}\" {packageArg} --profile {bti.Profile} {bti.AdditionalBuildArgs}",
             profile: bti.Profile,
@@ -133,6 +136,7 @@ public sealed class ToolchainService : IToolchainService
         var packageArg = TryGetPackageArgForManifest(bti.ManifestPath);
         return ExecuteOperationAsync(
             "Fmt",
+            bti.WorkspaceRoot,
             bti.ManifestPath,
             arguments: $"fmt --manifest-path \"{bti.ManifestPath}\" {packageArg} {bti.AdditionalBuildArgs}",
             profile: bti.Profile,
@@ -203,7 +207,7 @@ public sealed class ToolchainService : IToolchainService
         return string.Empty;
     }
 
-    public async Task<Workspace> GetWorkspaceAsync(PathEx manifestPath, CancellationToken ct)
+    public async Task<Workspace> GetWorkspaceAsync(PathEx manifestPath, PathEx workspaceRoot, CancellationToken ct)
     {
         try
         {
@@ -211,11 +215,11 @@ public sealed class ToolchainService : IToolchainService
 
             // Mode 1: WSL UNC workspace
             // Mode 2: Windows-local workspace + WSL execution (if selected)
-            if (TargetSystemSelection.TryGetWslExecutionContext(manifestPath, out var wslInfo, out var distroName))
+            if (TargetSystemSelection.TryGetWslExecutionContext(workspaceRoot, out var wslInfo, out var distroName))
             {
                 metadataJson = wslInfo != null
                     ? await GetWorkspaceMetadataWslAsync(manifestPath, wslInfo, ct)
-                    : await GetWorkspaceMetadataWslForWindowsWorkspaceAsync(manifestPath, distroName, ct);
+                    : await GetWorkspaceMetadataWslForWindowsWorkspaceAsync(manifestPath, workspaceRoot, distroName, ct);
             }
             else
             {
@@ -278,8 +282,12 @@ public sealed class ToolchainService : IToolchainService
     /// <summary>
     /// Mode 2: Windows-local workspace + WSL execution.
     /// </summary>
-    private async Task<string> GetWorkspaceMetadataWslForWindowsWorkspaceAsync(PathEx manifestPath, string distroName, CancellationToken ct)
+    private async Task<string> GetWorkspaceMetadataWslForWindowsWorkspaceAsync(PathEx manifestPath, PathEx workspaceRoot, string distroName, CancellationToken ct)
     {
+        // Initialize mirror config early so metadata can point TargetDirectory to UNC mirror outputs.
+        // This is lightweight (queries $HOME) and does NOT perform rsync.
+        await WslMirrorManager.EnsureInitializedAsync(workspaceRoot, distroName, ct);
+
         if (!WslPathMapper.TryWindowsToWslPath(manifestPath, out var linuxManifestPath) ||
             !WslPathMapper.TryWindowsToWslPath(manifestPath.GetDirectoryName(), out var linuxWorkingDir))
         {
@@ -300,8 +308,9 @@ public sealed class ToolchainService : IToolchainService
 
         var metadataJson = string.Join(string.Empty, proc.StandardOutputLines);
 
-        // Rewrite /mnt/<drive>/... paths in the JSON to Windows paths
-        return RewriteCargoMetadataPathsFromLinuxToWindows(metadataJson, wslInfo: null);
+        // Rewrite /mnt/<drive>/... paths in the JSON to Windows paths.
+        // Additionally, when using mirror mode, rewrite target_directory to UNC pointing to the mirror target dir.
+        return RewriteCargoMetadataPathsFromLinuxToWindows(metadataJson, wslInfo: null, workspaceRoot: workspaceRoot, distroName: distroName);
     }
 
     /// <summary>
@@ -309,7 +318,7 @@ public sealed class ToolchainService : IToolchainService
     /// Mode 1: Linux paths -> Windows UNC (\\wsl.localhost\...)
     /// Mode 2: /mnt/&lt;drive&gt;/... -> X:\...
     /// </summary>
-    private string RewriteCargoMetadataPathsFromLinuxToWindows(string json, WslInfo wslInfo)
+    private string RewriteCargoMetadataPathsFromLinuxToWindows(string json, WslInfo wslInfo, PathEx workspaceRoot = default, string distroName = null)
     {
         try
         {
@@ -318,8 +327,28 @@ public sealed class ToolchainService : IToolchainService
             // Rewrite workspace_root
             RewritePathProperty(obj, "workspace_root", wslInfo);
 
-            // Rewrite target_directory
-            RewritePathProperty(obj, "target_directory", wslInfo);
+            // Rewrite target_directory:
+            // - Mode 1: Linux -> UNC (workspace UNC)
+            // - Mode 2 legacy (/mnt): Linux -> Windows drive path
+            // - Mode 2 mirror: set to UNC of mirror target dir so debug/tests reference real outputs.
+            if (wslInfo != null)
+            {
+                RewritePathProperty(obj, "target_directory", wslInfo);
+            }
+            else
+            {
+                // If a mirror instance exists (initialized lazily), prefer its UNC target dir.
+                if (!string.IsNullOrWhiteSpace(distroName) && (string)workspaceRoot != null &&
+                    WslMirrorManager.TryGetMirrorTargetDirUnc(workspaceRoot, distroName, out var uncTargetDir) &&
+                    !string.IsNullOrWhiteSpace(uncTargetDir))
+                {
+                    obj["target_directory"] = uncTargetDir;
+                }
+                else
+                {
+                    RewritePathProperty(obj, "target_directory", wslInfo: null);
+                }
+            }
 
             // Rewrite paths in packages array
             if (obj["packages"] is Newtonsoft.Json.Linq.JArray packages)
@@ -389,6 +418,7 @@ public sealed class ToolchainService : IToolchainService
 
             var workingDir = tc.Manifest.GetDirectoryName();
             var isWsl = TargetSystemSelection.TryGetWslExecutionContext(workingDir, out var wslInfo, out var distroName);
+            string linuxWorkingDirForCargoTestNoRun = null;
 
             var cargoVersion = await ToolchainServiceExtensions.GetCommandOutputSingleLine("cargo", "--version", workingDir, ct);
             _tl.L.WriteLine($"Using: {cargoVersion}");
@@ -400,17 +430,33 @@ public sealed class ToolchainService : IToolchainService
             ProcessRunner proc;
             if (isWsl)
             {
-                var linuxManifestPath = wslInfo != null
-                    ? wslInfo.ToLinuxPath(tc.Manifest)
-                    : (WslPathMapper.TryWindowsToWslPath(tc.Manifest, out var lm) ? lm : null);
-                var linuxWorkingDir = wslInfo != null
-                    ? wslInfo.ToLinuxPath(workingDir)
-                    : (WslPathMapper.TryWindowsToWslPath(workingDir, out var ld) ? ld : null);
+                string linuxManifestPath;
+                string linuxWorkingDir;
+
+                if (wslInfo != null)
+                {
+                    // Mode 1: UNC workspace
+                    linuxManifestPath = wslInfo.ToLinuxPath(tc.Manifest);
+                    linuxWorkingDir = wslInfo.ToLinuxPath(workingDir);
+                }
+                else
+                {
+                    // Mode 2: Windows workspace -> ensure mirror is synced and run against mirror paths.
+                    var wsRoot = TargetSystemSelection.TryGetWorkspaceRoot(out var wr) ? wr : tc.Manifest.GetDirectoryName();
+                    var mirror = WslMirrorManager.GetOrCreate(wsRoot, distroName);
+                    await mirror.EnsureSynchronizedAsync(ct);
+                    var cfg = mirror.Config;
+
+                    linuxManifestPath = WslMirrorPathMapper.TryWindowsToMirrorLinuxPath((string)tc.Manifest, cfg, out var lm) ? lm : null;
+                    linuxWorkingDir = WslMirrorPathMapper.TryWindowsToMirrorLinuxPath((string)workingDir, cfg, out var ld) ? ld : null;
+                }
 
                 if (linuxManifestPath == null || linuxWorkingDir == null)
                 {
                     throw new InvalidOperationException($"Unable to map manifest/working directory to WSL paths. Manifest='{tc.Manifest}', WorkingDir='{workingDir}'.");
                 }
+
+                linuxWorkingDirForCargoTestNoRun = linuxWorkingDir;
 
                 var args = new[] { "test", "--no-run", "--manifest-path", linuxManifestPath, "--profile", profile }
                     .Concat(tc.AdditionalTestDiscoveryArguments.FromNullSeparatedArray())
@@ -464,15 +510,25 @@ public sealed class ToolchainService : IToolchainService
                 if (isWsl)
                 {
                     // For WSL, cargo may emit either absolute Linux paths or paths relative to the --cd directory.
-                    // Convert both forms safely.
-                    var linuxWorkingDir = wslInfo != null
-                        ? wslInfo.ToLinuxPath(workingDir)
-                        : (WslPathMapper.TryWindowsToWslPath(workingDir, out var ld) ? ld : null);
+                    // Mode 1: store UNC.
+                    // Mode 2 mirror: also store UNC (mirror output) so execution/debug works via WslInfo mapping.
                     try
                     {
-                        exes = wslInfo != null
-                            ? testExeBuildInfos.Select(x => ConvertWslTestExePathToUnc(x.Exe, linuxWorkingDir, wslInfo)).ToArray()
-                            : testExeBuildInfos.Select(x => ConvertWslTestExePathToWindows(x.Exe, linuxWorkingDir)).ToArray();
+                        if (wslInfo != null)
+                        {
+                            exes = testExeBuildInfos.Select(x => ConvertWslTestExePathToUnc(x.Exe, linuxWorkingDirForCargoTestNoRun, wslInfo)).ToArray();
+                        }
+                        else
+                        {
+                            // Mode 2 mirror: build outputs are in mirror, map Linux -> UNC via distro UNC root.
+                            var uncRoot = $"\\\\wsl.localhost\\{distroName}\\";
+                            if (!WslInfo.TryParse(uncRoot, out var distroInfo) || distroInfo == null)
+                            {
+                                throw new InvalidOperationException($"Unable to create WslInfo for distro '{distroName}'.");
+                            }
+
+                            exes = testExeBuildInfos.Select(x => ConvertWslTestExePathToUnc(x.Exe, linuxWorkingDirForCargoTestNoRun, distroInfo)).ToArray();
+                        }
                     }
                     catch (Exception ex)
                     {
@@ -675,6 +731,10 @@ public sealed class ToolchainService : IToolchainService
             {
                 test.SourcePath = (PathEx)winPath;
             }
+            else if (WslMirrorPathMapper.TryMirrorLinuxToWindowsPathBySentinel(rawSourcePath, out var mirrorWin))
+            {
+                test.SourcePath = (PathEx)mirrorWin;
+            }
         }
         else if (isWsl)
         {
@@ -693,6 +753,10 @@ public sealed class ToolchainService : IToolchainService
                 else if (WslPathMapper.TryWslToWindowsPath(linuxPath, out var winPath))
                 {
                     test.SourcePath = (PathEx)winPath;
+                }
+                else if (WslMirrorPathMapper.TryMirrorLinuxToWindowsPathBySentinel(linuxPath, out var mirrorWin))
+                {
+                    test.SourcePath = (PathEx)mirrorWin;
                 }
             }
             else
@@ -728,7 +792,7 @@ public sealed class ToolchainService : IToolchainService
         return w;
     }
 
-    private async Task<bool> ExecuteOperationAsync(string opName, PathEx filePath, string arguments, string profile, IBuildOutputSink outputPane, Func<BuildMessage, Task> buildMessageReporter, Func<string, BuildMessage[]> outputPreprocessor, ITelemetryService ts, ILogger l, CancellationToken ct)
+    private async Task<bool> ExecuteOperationAsync(string opName, PathEx workspaceRoot, PathEx filePath, string arguments, string profile, IBuildOutputSink outputPane, Func<BuildMessage, Task> buildMessageReporter, Func<string, BuildMessage[]> outputPreprocessor, ITelemetryService ts, ILogger l, CancellationToken ct)
     {
         outputPane.Clear();
 
@@ -746,6 +810,7 @@ public sealed class ToolchainService : IToolchainService
                 distroName,
                 opName,
                 arguments,
+                workspaceRoot,
                 workingDir,
                 redirector: new BuildOutputRedirector(outputPane, workingDir, buildMessageReporter, outputPreprocessor),
                 ct: ct);
@@ -789,27 +854,42 @@ public sealed class ToolchainService : IToolchainService
             ct);
     }
 
-    private static async Task<bool> RunWslAsync(WslInfo wslInfo, string distroName, string opName, string arguments, PathEx workingDir, ProcessOutputRedirector redirector, CancellationToken ct)
+    private static async Task<bool> RunWslAsync(WslInfo wslInfo, string distroName, string opName, string arguments, PathEx workspaceRoot, PathEx workingDir, ProcessOutputRedirector redirector, CancellationToken ct)
     {
         EnsureArg.IsNotEmptyOrWhiteSpace(arguments, nameof(arguments));
 
         EnsureArg.IsNotNullOrWhiteSpace(distroName, nameof(distroName));
 
+        // Mode 1: WSL UNC workspace -> execute directly in that workspace path (no mirror).
+        // Mode 2: Windows-local workspace + WSL execution -> execute on WSL-native mirror (rsync-on-build).
+        WslMirrorConfig mirrorConfig = null;
         string linuxWorkingDir;
         if (wslInfo != null)
         {
             linuxWorkingDir = wslInfo.ToLinuxPath(workingDir);
         }
-        else if (!WslPathMapper.TryWindowsToWslPath(workingDir, out linuxWorkingDir))
+        else
         {
-            throw new InvalidOperationException($"Unable to map working directory '{workingDir}' to a WSL /mnt path.").AddExitCode(-1);
+            var mirror = WslMirrorManager.GetOrCreate(workspaceRoot, distroName);
+            await mirror.EnsureSynchronizedAsync(ct);
+            mirrorConfig = mirror.Config;
+
+            // Working dir must be inside mirror.
+            if (mirrorConfig != null && WslMirrorPathMapper.TryWindowsToMirrorLinuxPath((string)workingDir, mirrorConfig, out var mirrorWd))
+            {
+                linuxWorkingDir = mirrorWd;
+            }
+            else if (!WslPathMapper.TryWindowsToWslPath(workingDir, out linuxWorkingDir))
+            {
+                throw new InvalidOperationException($"Unable to map working directory '{workingDir}' to a WSL path.").AddExitCode(-1);
+            }
         }
 
         var cargoVersion = await ToolchainServiceExtensions.GetCommandOutputSingleLine("cargo", "--version", workingDir, ct);
         var toolVersion = await ToolchainServiceExtensions.GetCommandOutputSingleLine(opName, "--version", workingDir, ct);
 
         // Convert arguments to array, handling quoted strings properly, and map any Windows paths to Linux.
-        var argList = ParseArgumentsForWsl(arguments, wslInfo);
+        var argList = ParseArgumentsForWsl(arguments, wslInfo, mirrorConfig);
         var argsForLog = string.Join(" ", argList.Select(ProcessRunner.QuoteSingleArgument));
 
         redirector?.WriteLineWithoutProcessing($"");
@@ -851,9 +931,11 @@ public sealed class ToolchainService : IToolchainService
     }
 
     /// <summary>
-    /// Parses cargo arguments and converts any Windows UNC paths to Linux paths for WSL.
+    /// Parses cargo arguments and converts any Windows paths to the correct Linux paths for WSL.
+    /// - Mode 1: UNC workspace -> direct UNC-to-Linux mapping
+    /// - Mode 2: Windows workspace -> mirror Linux paths (not /mnt)
     /// </summary>
-    private static string[] ParseArgumentsForWsl(string arguments, WslInfo wslInfo)
+    private static string[] ParseArgumentsForWsl(string arguments, WslInfo wslInfo, WslMirrorConfig mirrorConfig)
     {
         // Split arguments, handling quoted strings
         var args = new List<string>();
@@ -870,7 +952,7 @@ public sealed class ToolchainService : IToolchainService
             {
                 if (current.Length > 0)
                 {
-                    args.Add(ConvertPathArgumentForWsl(current.ToString(), wslInfo));
+                    args.Add(ConvertPathArgumentForWsl(current.ToString(), wslInfo, mirrorConfig));
                     current.Clear();
                 }
             }
@@ -882,7 +964,7 @@ public sealed class ToolchainService : IToolchainService
 
         if (current.Length > 0)
         {
-            args.Add(ConvertPathArgumentForWsl(current.ToString(), wslInfo));
+            args.Add(ConvertPathArgumentForWsl(current.ToString(), wslInfo, mirrorConfig));
         }
 
         return args.ToArray();
@@ -893,7 +975,7 @@ public sealed class ToolchainService : IToolchainService
     /// - Mode 1: \\wsl.localhost\... -> /home/...
     /// - Mode 2: C:\... -> /mnt/c/...
     /// </summary>
-    private static string ConvertPathArgumentForWsl(string arg, WslInfo wslInfo)
+    private static string ConvertPathArgumentForWsl(string arg, WslInfo wslInfo, WslMirrorConfig mirrorConfig)
     {
         if (string.IsNullOrEmpty(arg))
         {
@@ -919,7 +1001,13 @@ public sealed class ToolchainService : IToolchainService
             }
         }
 
-        // Mode 2: Windows workspace - rewrite any Windows-local paths to /mnt form.
+        // Mode 2: Windows workspace.
+        // Prefer mirror mapping when available; fall back to /mnt mapping (legacy) otherwise.
+        if (mirrorConfig != null)
+        {
+            return WslMirrorPathMapper.ConvertArgumentWindowsPathsToMirror(arg, mirrorConfig);
+        }
+
         return WslPathMapper.ConvertArgumentWindowsPathsToWsl(arg);
     }
 }

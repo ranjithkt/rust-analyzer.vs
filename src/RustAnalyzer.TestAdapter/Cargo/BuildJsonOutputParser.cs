@@ -175,7 +175,25 @@ public static class BuildJsonOutputParser
                 return wslInfo.ToUncPath(path);
             }
 
-            return WslPathMapper.TryWslToWindowsPath(path, out var winPath) ? winPath : path;
+            // Mode 2 (legacy): /mnt/<drive>/... -> X:\...
+            if (WslPathMapper.TryWslToWindowsPath(path, out var winPath))
+            {
+                return winPath;
+            }
+
+            // Mode 2 (mirror): mirror linux path -> Windows path.
+            if (TargetSystemSelection.IsWslSelected(out var distro) &&
+                WslMirrorManager.TryMapMirrorLinuxToWindows(workspaceRoot, distro, path, out var mirrorWin))
+            {
+                return mirrorWin;
+            }
+
+            if (WslMirrorPathMapper.TryMirrorLinuxToWindowsPathBySentinel(path, out var sentinelWin))
+            {
+                return sentinelWin;
+            }
+
+            return path;
         }
 
         return path;
@@ -202,7 +220,23 @@ public static class BuildJsonOutputParser
                     return wslInfo.ToUncPath(fileInfoPath);
                 }
 
-                return WslPathMapper.TryWslToWindowsPath(fileInfoPath, out var winPath) ? winPath : fileInfoPath;
+                if (WslPathMapper.TryWslToWindowsPath(fileInfoPath, out var winPath))
+                {
+                    return winPath;
+                }
+
+                if (TargetSystemSelection.IsWslSelected(out var distro) &&
+                    WslMirrorManager.TryMapMirrorLinuxToWindows(workspaceRoot, distro, fileInfoPath, out var mirrorWin))
+                {
+                    return mirrorWin;
+                }
+
+                if (WslMirrorPathMapper.TryMirrorLinuxToWindowsPathBySentinel(fileInfoPath, out var sentinelWin))
+                {
+                    return sentinelWin;
+                }
+
+                return fileInfoPath;
             }
             else
             {

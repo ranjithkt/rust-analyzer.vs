@@ -18,7 +18,7 @@ public interface IToolchainService
 
     Task<bool> RunFmtAsync(BuildTargetInfo bti, BuildOutputSinks bos, CancellationToken ct);
 
-    Task<Workspace> GetWorkspaceAsync(PathEx manifestPath, CancellationToken ct);
+    Task<Workspace> GetWorkspaceAsync(PathEx manifestPath, PathEx workspaceRoot, CancellationToken ct);
 
     /// <summary>
     /// NOTE: This is shameful. Cannot pull in IAsyncEnumerable without getting into dependency hell.

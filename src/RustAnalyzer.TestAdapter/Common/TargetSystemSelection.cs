@@ -63,5 +63,41 @@ public static class TargetSystemSelection
 
         return false;
     }
+
+    /// <summary>
+    /// Returns the current VS folder-workspace root (process-scoped), if available.
+    /// Used by mirror sync to locate the correct workspace root from layers that only have a manifest path.
+    /// </summary>
+    public static bool TryGetWorkspaceRoot(out PathEx workspaceRoot)
+    {
+        workspaceRoot = default;
+        try
+        {
+            var root = Environment.GetEnvironmentVariable(Constants.RAVsWorkspaceRoot);
+            if (string.IsNullOrWhiteSpace(root))
+            {
+                return false;
+            }
+
+            // Strip any redirected-output NULs.
+            if (root.IndexOf('\0') >= 0)
+            {
+                root = root.Replace("\0", string.Empty);
+            }
+
+            root = root.Trim();
+            if (string.IsNullOrWhiteSpace(root))
+            {
+                return false;
+            }
+
+            workspaceRoot = (PathEx)root;
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
+    }
 }
 

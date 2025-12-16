@@ -31,9 +31,28 @@ public sealed class StringBuildMessagePreprocessor
             {
                 var linuxPath = match.Groups["path"].Value;
                 var line = match.Groups["line"].Value;
-                var winPath = wsl != null
-                    ? wsl.ToUncPath(linuxPath)
-                    : (WslPathMapper.TryWslToWindowsPath(linuxPath, out var mapped) ? mapped : linuxPath);
+                string winPath;
+                if (wsl != null)
+                {
+                    winPath = wsl.ToUncPath(linuxPath);
+                }
+                else if (WslPathMapper.TryWslToWindowsPath(linuxPath, out var mapped))
+                {
+                    winPath = mapped;
+                }
+                else if (TargetSystemSelection.IsWslSelected(out var distro) &&
+                         WslMirrorManager.TryMapMirrorLinuxToWindowsFromWorkspacePath(rp, distro, linuxPath, out var mirrorWin))
+                {
+                    winPath = mirrorWin;
+                }
+                else if (WslMirrorPathMapper.TryMirrorLinuxToWindowsPathBySentinel(linuxPath, out var sentinelWin))
+                {
+                    winPath = sentinelWin;
+                }
+                else
+                {
+                    winPath = linuxPath;
+                }
                 return $"{winPath}({line},1): warning: diffs created by fmt";
             }
             return x;
@@ -50,9 +69,28 @@ public sealed class StringBuildMessagePreprocessor
                 var linuxPath = match.Groups["path"].Value;
                 var line = match.Groups["line"].Value;
                 var col = match.Groups["col"].Value;
-                var winPath = wsl != null
-                    ? wsl.ToUncPath(linuxPath)
-                    : (WslPathMapper.TryWslToWindowsPath(linuxPath, out var mapped) ? mapped : linuxPath);
+                string winPath;
+                if (wsl != null)
+                {
+                    winPath = wsl.ToUncPath(linuxPath);
+                }
+                else if (WslPathMapper.TryWslToWindowsPath(linuxPath, out var mapped))
+                {
+                    winPath = mapped;
+                }
+                else if (TargetSystemSelection.IsWslSelected(out var distro) &&
+                         WslMirrorManager.TryMapMirrorLinuxToWindowsFromWorkspacePath(rp, distro, linuxPath, out var mirrorWin))
+                {
+                    winPath = mirrorWin;
+                }
+                else if (WslMirrorPathMapper.TryMirrorLinuxToWindowsPathBySentinel(linuxPath, out var sentinelWin))
+                {
+                    winPath = sentinelWin;
+                }
+                else
+                {
+                    winPath = linuxPath;
+                }
                 return $"{winPath}({line},{col}): error: clippy\0{indent}--> {linuxPath}:{line}:{col}";
             }
             return x;

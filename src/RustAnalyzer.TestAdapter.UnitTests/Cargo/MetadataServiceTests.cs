@@ -52,7 +52,7 @@ public sealed class MetadataServiceTests
 
         await mds.GetPackageAsync(manifestPath, default);
         await mds.GetPackageAsync(manifestPath, default);
-        cs.Verify(x => x.GetWorkspaceAsync(manifestPath, default), Times.Once); // NOTE: Just 1 calls to ICS for 2 MDS calls.
+        cs.Verify(x => x.GetWorkspaceAsync(manifestPath, workspaceRoot, default), Times.Once); // NOTE: Just 1 calls to ICS for 2 MDS calls.
     }
 
     [Theory]
@@ -69,7 +69,7 @@ public sealed class MetadataServiceTests
         await mds.GetPackageAsync(manifestPath, default);
         await mds.OnWorkspaceUpdateAsync(new[] { manifestPath.GetDirectoryName().Combine((PathEx)"src/main.rs") }, default);
         await mds.GetPackageAsync(manifestPath, default);
-        cs.Verify(x => x.GetWorkspaceAsync(manifestPath, default), Times.Exactly(2)); // NOTE: Just 2 calls to ICS for 3 MDS calls.
+        cs.Verify(x => x.GetWorkspaceAsync(manifestPath, workspaceRoot, default), Times.Exactly(2)); // NOTE: Just 2 calls to ICS for 3 MDS calls.
     }
 
     [Theory]
@@ -121,7 +121,7 @@ public sealed class MetadataServiceTests
     private static void CreateMDS(PathEx workspaceRoot, PathEx manifestPath, out Mock<IToolchainService> cs, out IMetadataService mds)
     {
         cs = new Mock<IToolchainService>();
-        cs.Setup(cs => cs.GetWorkspaceAsync(It.IsAny<PathEx>(), It.IsAny<CancellationToken>()))
+        cs.Setup(cs => cs.GetWorkspaceAsync(It.IsAny<PathEx>(), It.IsAny<PathEx>(), It.IsAny<CancellationToken>()))
             .Returns(CreateWorkspace(manifestPath).ToTask());
         mds = new MetadataService(cs.Object, workspaceRoot, TestHelpers.TL);
     }
@@ -129,7 +129,7 @@ public sealed class MetadataServiceTests
     private static void CreateTestableMDS(PathEx workspaceRoot, PathEx manifestPath, out Mock<IToolchainService> cs, out IMetadataService mds)
     {
         cs = new Mock<IToolchainService>();
-        cs.Setup(cs => cs.GetWorkspaceAsync(It.IsAny<PathEx>(), It.IsAny<CancellationToken>()))
+        cs.Setup(cs => cs.GetWorkspaceAsync(It.IsAny<PathEx>(), It.IsAny<PathEx>(), It.IsAny<CancellationToken>()))
             .Returns(CreateWorkspace(manifestPath).ToTask());
         mds = new TestableMDS(cs.Object, workspaceRoot, TestHelpers.TL);
     }

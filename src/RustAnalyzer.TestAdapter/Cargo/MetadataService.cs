@@ -137,7 +137,7 @@ public class MetadataService : IMetadataService, IDisposable
 
     private async Task<Workspace.Package> GetPackageAsyncCore(PathEx manifestPath, CancellationToken ct)
     {
-        var w = await _cargoService.GetWorkspaceAsync(manifestPath, ct);
+        var w = await _cargoService.GetWorkspaceAsync(manifestPath, _workspaceRoot, ct);
         var p = w.Packages.FirstOrDefault(p => p.ManifestPath.GetFullPath() == manifestPath.GetFullPath());
 
         Ensure.That(p).IsNotNull();

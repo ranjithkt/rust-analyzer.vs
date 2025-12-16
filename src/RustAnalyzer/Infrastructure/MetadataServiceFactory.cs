@@ -23,6 +23,20 @@ public sealed class MetadataServiceFactory : IWorkspaceServiceFactory
 
     public object CreateService(IWorkspace workspaceContext)
     {
+        // Stamp the current folder workspace root into a process-scoped env var so the TestAdapter layer
+        // (which doesn't have access to IWorkspace) can locate the correct workspace root for mirror sync.
+        try
+        {
+            Environment.SetEnvironmentVariable(
+                KS.RustAnalyzer.TestAdapter.Constants.RAVsWorkspaceRoot,
+                workspaceContext?.Location ?? string.Empty,
+                EnvironmentVariableTarget.Process);
+        }
+        catch
+        {
+            // Best-effort only.
+        }
+
         var mds = new MetadataService(
             CargoService,
             (PathEx)workspaceContext.Location,

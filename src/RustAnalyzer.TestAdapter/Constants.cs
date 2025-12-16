@@ -35,6 +35,9 @@ public static class Constants
     // - RAVsWslDistroName = "<DistroName>" (only meaningful when RAVsTargetSystem == "wsl")
     public const string RAVsTargetSystem = "RAVsTargetSystem";
     public const string RAVsWslDistroName = "RAVsWslDistroName";
+    // Workspace root (process-scoped) for mirror sync helpers.
+    // Set by the VS extension layer when a folder workspace is created.
+    public const string RAVsWorkspaceRoot = "RAVsWorkspaceRoot";
     // Monotonic stamp (UTC ticks) updated whenever target system selection changes.
     // Used to invalidate VS workspace scanner caches across target switches.
     public const string RAVsTargetSystemStampUtcTicks = "RAVsTargetSystemStampUtcTicks";
