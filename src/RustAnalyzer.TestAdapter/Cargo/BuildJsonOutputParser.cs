@@ -35,6 +35,31 @@ public static class BuildJsonOutputParser
 
     public static BuildMessage[] Parse(PathEx workspaceRoot, string jsonLine, TL tl)
     {
+        if (string.IsNullOrWhiteSpace(jsonLine))
+        {
+            return Array.Empty<BuildMessage>();
+        }
+
+        // Fast-path:
+        // `cargo --message-format json` can emit hundreds/thousands of `compiler-artifact` lines even when nothing
+        // is rebuilt (fresh=true). Parsing each line as JSON is expensive and makes no-op builds feel "slow".
+        // Skip those without JSON parsing.
+        // Also skip build-finished records.
+        var trimmed = jsonLine.TrimStart();
+        if (trimmed.Length > 0 && trimmed[0] == '{')
+        {
+            if (trimmed.IndexOf("\"reason\":\"compiler-artifact\"", StringComparison.Ordinal) >= 0 &&
+                trimmed.IndexOf("\"fresh\":true", StringComparison.Ordinal) >= 0)
+            {
+                return Array.Empty<BuildMessage>();
+            }
+
+            if (trimmed.IndexOf("\"reason\":\"build-finished\"", StringComparison.Ordinal) >= 0)
+            {
+                return Array.Empty<BuildMessage>();
+            }
+        }
+
         dynamic obj;
         try
         {

@@ -62,13 +62,14 @@ public sealed class CmdServices
         var opts = await Options.GetLiveInstanceAsync();
 
         var bms = await FolderWorkspaceService.CurrentWorkspace.GetBuildMessageServiceAsync();
+        var workspaceRoot = (PathEx)(FolderWorkspaceService?.CurrentWorkspace?.Location ?? manifestPath.GetDirectoryName());
         await op(ToolchainService)(
             new BuildTargetInfo
             {
                 ManifestPath = manifestPath,
                 AdditionalBuildArgs = getOpts(opts),
                 Profile = profile,
-                WorkspaceRoot = manifestPath.GetDirectoryName(),
+                WorkspaceRoot = workspaceRoot,
             },
             new BuildOutputSinks { OutputSink = BuildOutputSink, BuildActionProgressReporter = bm => bms.ReportBuildMessages(new[] { _buildMessageMapper.Map<WorkspaceBuildMessage>(bm) }) },
             default);

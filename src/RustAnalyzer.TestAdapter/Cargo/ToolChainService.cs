@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Collections.Immutable;
 using System.Collections.ObjectModel;
 using System.ComponentModel.Composition;
+using System.IO;
 using System.Linq;
 using System.Text.RegularExpressions;
 using System.Threading;
@@ -48,10 +49,12 @@ public sealed class ToolchainService : IToolchainService
 
     public async Task<bool> BuildAsync(BuildTargetInfo bti, BuildOutputSinks bos, CancellationToken ct)
     {
+        var packageArg = TryGetPackageArgForManifest(bti.ManifestPath);
+
         var success = await ExecuteOperationAsync(
             "build",
             bti.ManifestPath,
-            arguments: $"build --manifest-path \"{bti.ManifestPath}\" --profile {bti.Profile} --message-format json {bti.AdditionalBuildArgs}",
+            arguments: $"build --manifest-path \"{bti.ManifestPath}\" {packageArg} --profile {bti.Profile} --message-format json {bti.AdditionalBuildArgs}",
             profile: bti.Profile,
             outputPane: bos.OutputSink,
             buildMessageReporter: bos.BuildActionProgressReporter,
@@ -75,10 +78,11 @@ public sealed class ToolchainService : IToolchainService
 
     public Task<bool> CleanAsync(BuildTargetInfo bti, BuildOutputSinks bos, CancellationToken ct)
     {
+        var packageArg = TryGetPackageArgForManifest(bti.ManifestPath);
         return ExecuteOperationAsync(
             "clean",
             bti.ManifestPath,
-            arguments: $"clean --manifest-path \"{bti.ManifestPath}\" --profile {bti.Profile}",
+            arguments: $"clean --manifest-path \"{bti.ManifestPath}\" {packageArg} --profile {bti.Profile}",
             profile: bti.Profile,
             outputPane: bos.OutputSink,
             buildMessageReporter: bos.BuildActionProgressReporter,
@@ -90,10 +94,11 @@ public sealed class ToolchainService : IToolchainService
 
     public Task<bool> RunClippyAsync(BuildTargetInfo bti, BuildOutputSinks bos, CancellationToken ct)
     {
+        var packageArg = TryGetPackageArgForManifest(bti.ManifestPath);
         return ExecuteOperationAsync(
             "Clippy",
             bti.ManifestPath,
-            arguments: $"clippy --manifest-path \"{bti.ManifestPath}\" --profile {bti.Profile} {bti.AdditionalBuildArgs}",
+            arguments: $"clippy --manifest-path \"{bti.ManifestPath}\" {packageArg} --profile {bti.Profile} {bti.AdditionalBuildArgs}",
             profile: bti.Profile,
             outputPane: bos.OutputSink,
             buildMessageReporter: bos.BuildActionProgressReporter,
@@ -105,10 +110,11 @@ public sealed class ToolchainService : IToolchainService
 
     public Task<bool> RunFmtAsync(BuildTargetInfo bti, BuildOutputSinks bos, CancellationToken ct)
     {
+        var packageArg = TryGetPackageArgForManifest(bti.ManifestPath);
         return ExecuteOperationAsync(
             "Fmt",
             bti.ManifestPath,
-            arguments: $"fmt --manifest-path \"{bti.ManifestPath}\" {bti.AdditionalBuildArgs}",
+            arguments: $"fmt --manifest-path \"{bti.ManifestPath}\" {packageArg} {bti.AdditionalBuildArgs}",
             profile: bti.Profile,
             outputPane: bos.OutputSink,
             buildMessageReporter: bos.BuildActionProgressReporter,
@@ -116,6 +122,65 @@ public sealed class ToolchainService : IToolchainService
             ts: _tl.T,
             l: _tl.L,
             ct: ct);
+    }
+
+    private static string TryGetPackageArgForManifest(PathEx manifestPath)
+    {
+        try
+        {
+            var path = (string)manifestPath;
+            if (string.IsNullOrWhiteSpace(path) || !File.Exists(path))
+            {
+                return string.Empty;
+            }
+
+            // Quick & safe-ish TOML sniffing: only look for `name = "..."` inside the `[package]` table.
+            // If it's a virtual workspace manifest (no [package]) we return empty and cargo will use default behavior.
+            var inPackage = false;
+            foreach (var rawLine in File.ReadLines(path))
+            {
+                var line = rawLine.Trim();
+                if (line.Length == 0 || line.StartsWith("#"))
+                {
+                    continue;
+                }
+
+                if (line.StartsWith("[") && line.EndsWith("]"))
+                {
+                    inPackage = string.Equals(line, "[package]", StringComparison.OrdinalIgnoreCase);
+                    continue;
+                }
+
+                if (!inPackage)
+                {
+                    continue;
+                }
+
+                // name = "common"
+                if (line.StartsWith("name", StringComparison.OrdinalIgnoreCase))
+                {
+                    var eq = line.IndexOf('=');
+                    if (eq > 0 && eq < line.Length - 1)
+                    {
+                        var rhs = line.Substring(eq + 1).Trim();
+                        if (rhs.StartsWith("\"") && rhs.EndsWith("\"") && rhs.Length >= 2)
+                        {
+                            var name = rhs.Substring(1, rhs.Length - 2);
+                            if (!string.IsNullOrWhiteSpace(name))
+                            {
+                                return $"--package \"{name}\"";
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        catch
+        {
+            // Best-effort only.
+        }
+
+        return string.Empty;
     }
 
     public async Task<Workspace> GetWorkspaceAsync(PathEx manifestPath, CancellationToken ct)
