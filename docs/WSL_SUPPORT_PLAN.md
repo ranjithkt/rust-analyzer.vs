@@ -6,6 +6,9 @@ This plan covers two “workspace location” modes:
 - **Mode 1 (WSL UNC workspace)**: user opens a folder under `\\wsl.localhost\…` (or `\\wsl$\…`).
 - **Mode 2 (Windows workspace, WSL execution)** *(Option 1 requested)*: user opens a folder under `C:\…` (or other Windows local drive), but **build/clippy/fmt/test/debug** are executed in WSL.
 
+> Status update (Dec 2025): **Mode 2 via `/mnt/<drive>` is not acceptable** because it can trigger a rebuild on every build even when nothing changed.
+> The replacement plan is **WSL Mirror Sync (build on WSL native filesystem)**: see [`WSL_MIRROR_SYNC_PLAN.md`](WSL_MIRROR_SYNC_PLAN.md).
+
 > Important: **Mode 2 is the recommended path for VS 2026 / 18.x** because VS Open Folder has shown instability when its workspace DB lives under `\\wsl.localhost\...` (see “VS 2026 note” below).
 
 In both modes, the extension can:
