@@ -151,8 +151,10 @@ public sealed class RustAnalyzerPackage : ToolkitPackage
             await _preReqs.SatisfyAsync(cancellationToken);
         }
 
-        await _raDownloader.InstallLatestAsync();
-        await RlsUpdatedNotification.ShowAsync();
+        // NOTE:
+        // rust-analyzer binary acquisition is now handled on-demand by the language client
+        // (see LanguageService/LanguageClient.ActivateAsync). This avoids the common case
+        // where the server activates with an older exe and then we have to prompt for a VS restart.
     }
 
     private static async Task<bool> IsWslDistroInstalledAsync(string distroName, CancellationToken ct)

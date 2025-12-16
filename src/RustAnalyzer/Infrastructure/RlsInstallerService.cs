@@ -19,7 +19,7 @@ public interface IRlsInstallerService
 {
     Task<PathEx> GetExePathAsync();
 
-    Task InstallLatestAsync();
+    Task InstallLatestAsync(CancellationToken cancellationToken = default);
 }
 
 [Export(typeof(IRlsInstallerService))]
@@ -42,12 +42,12 @@ public class RlsInstallerService : IRlsInstallerService
         };
     }
 
-    public async Task InstallLatestAsync()
+    public async Task InstallLatestAsync(CancellationToken cancellationToken = default)
     {
         _tl.L.WriteLine("Initiating download of RLS...");
         try
         {
-            var latestRel = await GetLatestRlsReleaseRedirectUriAsync();
+            var latestRel = await GetLatestRlsReleaseRedirectUriAsync(cancellationToken);
             string installedVer = await GetInstalledVersionAsync();
             if (latestRel != null && installedVer.CompareTo(latestRel?.Version) >= 0)
             {
@@ -56,13 +56,18 @@ public class RlsInstallerService : IRlsInstallerService
                 return;
             }
 
-            using var response = await DownloadAsync(latestRel);
+            using var response = await DownloadAsync(latestRel, cancellationToken);
 
             using var zipStream = await response.Content.ReadAsStreamAsync();
             Install(zipStream, latestRel?.Version);
 
             await CommitAsync(latestRel);
             _tl.T.TrackEvent("RLSDS.RlsInstalled", ("Installed", installedVer));
+        }
+        catch (OperationCanceledException)
+        {
+            // Normal during shutdown/cancellation – don't surface as a hard failure.
+            _tl.L.WriteLine("RLS download cancelled.");
         }
         catch (Exception ex)
         {
@@ -77,11 +82,11 @@ public class RlsInstallerService : IRlsInstallerService
         return GetVersionedExePath(await GetInstalledVersionAsync());
     }
 
-    public static async Task<(Uri Uri, string Version)?> GetLatestRlsReleaseRedirectUriAsync()
+    public static async Task<(Uri Uri, string Version)?> GetLatestRlsReleaseRedirectUriAsync(CancellationToken cancellationToken = default)
     {
         try
         {
-            var latestRelUri = await GetRedirectedUrlAsync("https://github.com/rust-lang/rust-analyzer/releases/latest".ToUri());
+            var latestRelUri = await GetRedirectedUrlAsync("https://github.com/rust-lang/rust-analyzer/releases/latest".ToUri(), cancellationToken);
 
             var latestRelVersion = latestRelUri.Segments[latestRelUri.Segments.Length - 1];
             var latestRelDate = DateTime.ParseExact(latestRelVersion, VersionFormat, CultureInfo.InvariantCulture);
@@ -100,10 +105,11 @@ public class RlsInstallerService : IRlsInstallerService
         return GetInstallFolder(version) + (PathEx)$"rust-analyzer.exe";
     }
 
-    private async Task<HttpResponseMessage> DownloadAsync((Uri Uri, string Version)? latestRel)
+    private async Task<HttpResponseMessage> DownloadAsync((Uri Uri, string Version)? latestRel, CancellationToken cancellationToken)
     {
         _tl.L.WriteLine($"Downloading RLS from {latestRel?.Uri}.");
-        var response = await new HttpClient().GetAsync(latestRel?.Uri);
+        using var client = new HttpClient { Timeout = TimeSpan.FromSeconds(60) };
+        var response = await client.GetAsync(latestRel?.Uri, cancellationToken);
         if (!response.IsSuccessStatusCode)
         {
             _tl.L.WriteError($"Download failed. StatusCode {response.StatusCode}.");
@@ -124,7 +130,6 @@ public class RlsInstallerService : IRlsInstallerService
         }
 
         Registry.SetValue(regRoot, InstalledRlsVersionKey, latestRel?.Version);
-        RlsUpdatedNotification.Enabled = true;
         _tl.L.WriteLine($"Committed RLS installation.");
     }
 
@@ -168,7 +173,10 @@ public class RlsInstallerService : IRlsInstallerService
 
     private static async Task<Uri> GetRedirectedUrlAsync(Uri uri, CancellationToken cancellationToken = default)
     {
-        using var client = new HttpClient(new HttpClientHandler { AllowAutoRedirect = false, }, true);
+        using var client = new HttpClient(new HttpClientHandler { AllowAutoRedirect = false, }, true)
+        {
+            Timeout = TimeSpan.FromSeconds(10),
+        };
         using var response = await client.GetAsync(uri, cancellationToken);
 
         return new Uri(response.Headers.GetValues("Location").First());

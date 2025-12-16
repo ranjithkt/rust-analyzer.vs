@@ -49,7 +49,6 @@ public abstract class BuildFileContextBase : IBuildFileContext
             OutputSink = _outputPane,
         };
 
-        await RlsUpdatedNotification.ShowAsync();
         return await _commandFunc(BuildTargetInfo, bos, cancellationToken);
     }
 }

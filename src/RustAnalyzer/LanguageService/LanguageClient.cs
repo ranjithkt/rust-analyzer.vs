@@ -62,6 +62,19 @@ public class LanguageClient : ILanguageClient, ILanguageClientCustomMessage2
 
     public async Task<Connection> ActivateAsync(CancellationToken token)
     {
+        // Ensure we have the newest rust-analyzer before we start the LSP process.
+        // This avoids the "updated in the background, restart VS" loop (especially noticeable in VS Exp instances).
+        try
+        {
+            await RADownloader.InstallLatestAsync(token);
+        }
+        catch (Exception ex)
+        {
+            // Best-effort only: if download/update fails, fall back to whatever is already installed in the package cache.
+            L.WriteError("rust-analyzer update check failed. Falling back to existing binary. Ex: {0}", ex);
+            T.TrackException(ex);
+        }
+
         var rlsPath = await RADownloader.GetExePathAsync();
         L.WriteLine("Starting rust-analyzer from path: {0}.", rlsPath);
         ProcessStartInfo info = new()
