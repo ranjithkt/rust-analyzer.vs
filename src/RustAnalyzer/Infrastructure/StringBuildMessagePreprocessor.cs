@@ -8,25 +8,33 @@ namespace KS.RustAnalyzer.Infrastructure;
 
 public sealed class StringBuildMessagePreprocessor
 {
+    private static readonly Regex AnsiPrefixRegex = new(@"^(\x1b\[\d*m)+", RegexOptions.Compiled);
+    private static readonly Regex WindowsFmtDiffRegex = new(@"^Diff in \\\\\?\\(.*) at line (\d*)\:", RegexOptions.Compiled);
+    private static readonly Regex WindowsClippyArrowRegex = new(@"^( )*\-\-\> (.*)\:(\d+):(\d+)", RegexOptions.Compiled);
+
+    private static readonly Regex WslFmtDiffRegex = new(@"^Diff in (?<path>\/.*?) at line (?<line>\d+)\:", RegexOptions.Compiled);
+    private static readonly Regex WslClippyAbsArrowRegex = new(@"^( )*\-\-\> (?<path>\/.*?):(?<line>\d+):(?<col>\d+)", RegexOptions.Compiled);
+    private static readonly Regex WslClippyRelArrowRegex = new(@"^( )*\-\-\> (?<path>[^\/].*?):(?<line>\d+):(?<col>\d+)", RegexOptions.Compiled);
+
     // Windows-specific processors
     private static readonly Func<PathEx, WslInfo, string, string>[] WindowsProcessors = new Func<PathEx, WslInfo, string, string>[]
     {
-        (PathEx rp, WslInfo _, string x) => Regex.Replace(x, @"^(\x1b\[\d*m)+", string.Empty),
-        (PathEx rp, WslInfo _, string x) => Regex.Replace(x, @"^Diff in \\\\\?\\(.*) at line (\d*)\:", "$1($2,1): warning: diffs created by fmt"),
-        (PathEx rp, WslInfo _, string x) => Regex.Replace(x, @"^( )*\-\-\> (.*)\:(\d+):(\d+)", $"{rp.Combine((PathEx)"$2")}($3,$4): error: clippy\0$0"),
+        (PathEx rp, WslInfo _, string x) => AnsiPrefixRegex.Replace(x, string.Empty),
+        (PathEx rp, WslInfo _, string x) => WindowsFmtDiffRegex.Replace(x, "$1($2,1): warning: diffs created by fmt"),
+        (PathEx rp, WslInfo _, string x) => WindowsClippyArrowRegex.Replace(x, $"{rp.Combine((PathEx)"$2")}($3,$4): error: clippy\0$0"),
     };
 
     // WSL/Linux-specific processors
     private static readonly Func<PathEx, WslInfo, string, string>[] WslProcessors = new Func<PathEx, WslInfo, string, string>[]
     {
         // Strip ANSI escape codes
-        (PathEx rp, WslInfo wsl, string x) => Regex.Replace(x, @"^(\x1b\[\d*m)+", string.Empty),
+        (PathEx rp, WslInfo wsl, string x) => AnsiPrefixRegex.Replace(x, string.Empty),
 
         // Handle rustfmt diff output with Linux paths: "Diff in /home/.../file.rs at line N:"
         (PathEx rp, WslInfo wsl, string x) =>
         {
             // Allow spaces in paths by matching lazily up to " at line ".
-            var match = Regex.Match(x, @"^Diff in (?<path>\/.*?) at line (?<line>\d+)\:");
+            var match = WslFmtDiffRegex.Match(x);
             if (match.Success)
             {
                 var linuxPath = match.Groups["path"].Value;
@@ -62,7 +70,7 @@ public sealed class StringBuildMessagePreprocessor
         (PathEx rp, WslInfo wsl, string x) =>
         {
             // Allow spaces in paths by matching lazily up to ":<line>:<col>".
-            var match = Regex.Match(x, @"^( )*\-\-\> (?<path>\/.*?):(?<line>\d+):(?<col>\d+)");
+            var match = WslClippyAbsArrowRegex.Match(x);
             if (match.Success)
             {
                 var indent = match.Groups[1].Value;
@@ -100,7 +108,7 @@ public sealed class StringBuildMessagePreprocessor
         (PathEx rp, WslInfo wsl, string x) =>
         {
             // Allow spaces in relative paths by matching lazily up to ":<line>:<col>".
-            var match = Regex.Match(x, @"^( )*\-\-\> (?<path>[^\/].*?):(?<line>\d+):(?<col>\d+)");
+            var match = WslClippyRelArrowRegex.Match(x);
             if (match.Success && !match.Groups["path"].Value.StartsWith("/"))
             {
                 var indent = match.Groups[1].Value;

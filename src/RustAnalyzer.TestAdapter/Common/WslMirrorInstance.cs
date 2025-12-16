@@ -4,9 +4,9 @@ using System.Collections.Immutable;
 using System.IO;
 using System.Linq;
 using System.Security.Cryptography;
+using System.Threading;
 using System.Text;
 using System.Text.RegularExpressions;
-using System.Threading;
 using System.Threading.Tasks;
 using KS.RustAnalyzer.TestAdapter;
 using KS.RustAnalyzer.TestAdapter.Cargo;
@@ -29,10 +29,12 @@ public sealed class WslMirrorInstance : IDisposable
     private readonly object _watcherLock = new();
 
     private bool _initialized;
-    private bool _disposed;
+    private int _disposed;
 
-    private volatile bool _workspaceDirty = true;
-    private volatile bool _depsDirty = true;
+    // Dirty flags: use Interlocked to avoid lost updates between watcher threads and sync thread.
+    // 0 = clean, 1 = dirty
+    private int _workspaceDirty = 1;
+    private int _depsDirty = 1;
 
     private FileSystemWatcher _workspaceWatcher;
     private readonly Dictionary<string, FileSystemWatcher> _depWatchers = new(StringComparer.OrdinalIgnoreCase);
@@ -88,18 +90,19 @@ public sealed class WslMirrorInstance : IDisposable
     {
         await EnsureInitializedAsync(ct);
 
-        if (_depsDirty)
+        var depsDirty = Interlocked.Exchange(ref _depsDirty, 0) == 1;
+        if (depsDirty)
         {
             await RefreshExternalRootsAsync(ct);
         }
 
-        if (_workspaceDirty)
+        var workspaceDirty = Interlocked.Exchange(ref _workspaceDirty, 0) == 1;
+        if (workspaceDirty)
         {
             await RsyncWindowsRootToMirrorAsync(_workspaceRootWindows, ct);
-            _workspaceDirty = false;
         }
 
-        // Sync external roots (outside workspace root) only if marked dirty.
+        // Sync external roots (outside workspace root) only if deps were marked dirty.
         if (_externalRoots.Count > 0)
         {
             foreach (var root in _externalRoots.ToArray())
@@ -109,15 +112,13 @@ public sealed class WslMirrorInstance : IDisposable
                     ct.ThrowIfCancellationRequested();
                 }
 
-                // If deps dirty we resync all external roots (safe).
-                if (_depsDirty)
+                // If deps were dirty we resync all external roots (safe).
+                if (depsDirty)
                 {
                     await RsyncWindowsRootToMirrorAsync((PathEx)root, ct);
                 }
             }
         }
-
-        _depsDirty = false;
     }
 
     private void EnsureWorkspaceWatcher()
@@ -146,7 +147,19 @@ public sealed class WslMirrorInstance : IDisposable
         w.Created += (_, e) => OnAnyWorkspaceChanged(e.FullPath);
         w.Deleted += (_, e) => OnAnyWorkspaceChanged(e.FullPath);
         w.Renamed += (_, e) => OnAnyWorkspaceChanged(e.FullPath);
-        w.Error += (_, __) => { _workspaceDirty = true; _depsDirty = true; };
+        w.Error += (_, __) =>
+        {
+            MarkWorkspaceDirty();
+            MarkDepsDirty();
+
+            try
+            {
+                System.Diagnostics.Trace.WriteLine("WslMirrorInstance: workspace FileSystemWatcher error (possible buffer overflow). Marking mirror dirty for full resync.");
+            }
+            catch
+            {
+            }
+        };
 
         _workspaceWatcher = w;
     }
@@ -178,7 +191,18 @@ public sealed class WslMirrorInstance : IDisposable
             w.Created += (_, e) => OnAnyDepChanged(root, e.FullPath);
             w.Deleted += (_, e) => OnAnyDepChanged(root, e.FullPath);
             w.Renamed += (_, e) => OnAnyDepChanged(root, e.FullPath);
-            w.Error += (_, __) => { _depsDirty = true; };
+            w.Error += (_, __) =>
+            {
+                MarkDepsDirty();
+
+                try
+                {
+                    System.Diagnostics.Trace.WriteLine("WslMirrorInstance: dependency FileSystemWatcher error (possible buffer overflow). Marking mirror deps dirty for full resync.");
+                }
+                catch
+                {
+                }
+            };
 
             _depWatchers[root] = w;
         }
@@ -191,11 +215,11 @@ public sealed class WslMirrorInstance : IDisposable
             return;
         }
 
-        _workspaceDirty = true;
+        MarkWorkspaceDirty();
 
         if (IsManifestOrLock(fullPath))
         {
-            _depsDirty = true;
+            MarkDepsDirty();
         }
     }
 
@@ -206,12 +230,22 @@ public sealed class WslMirrorInstance : IDisposable
             return;
         }
 
-        _depsDirty = true;
+        MarkDepsDirty();
 
         if (IsManifestOrLock(fullPath))
         {
-            _depsDirty = true;
+            MarkDepsDirty();
         }
+    }
+
+    private void MarkWorkspaceDirty()
+    {
+        Interlocked.Exchange(ref _workspaceDirty, 1);
+    }
+
+    private void MarkDepsDirty()
+    {
+        Interlocked.Exchange(ref _depsDirty, 1);
     }
 
     private bool ShouldIgnore(string fullPath)
@@ -231,9 +265,7 @@ public sealed class WslMirrorInstance : IDisposable
                     continue;
                 }
 
-                // Cheap substring ignore: "\\target\\" etc.
-                var needle = "\\" + dir.Trim('\\', '/') + "\\";
-                if (fullPath.IndexOf(needle, StringComparison.OrdinalIgnoreCase) >= 0)
+                if (ContainsPathSegment(fullPath, dir))
                 {
                     return true;
                 }
@@ -245,6 +277,41 @@ public sealed class WslMirrorInstance : IDisposable
         }
 
         return false;
+    }
+
+    private static bool ContainsPathSegment(string fullPath, string segment)
+    {
+        if (string.IsNullOrWhiteSpace(fullPath) || string.IsNullOrWhiteSpace(segment))
+        {
+            return false;
+        }
+
+        var seg = segment.Trim('\\', '/');
+        if (seg.Length == 0)
+        {
+            return false;
+        }
+
+        // Look for occurrences of seg and ensure it is a full path segment (bounded by separators or ends).
+        var idx = 0;
+        while (true)
+        {
+            idx = fullPath.IndexOf(seg, idx, StringComparison.OrdinalIgnoreCase);
+            if (idx < 0)
+            {
+                return false;
+            }
+
+            var beforeOk = idx == 0 || fullPath[idx - 1] == '\\' || fullPath[idx - 1] == '/';
+            var afterIdx = idx + seg.Length;
+            var afterOk = afterIdx >= fullPath.Length || fullPath[afterIdx] == '\\' || fullPath[afterIdx] == '/';
+            if (beforeOk && afterOk)
+            {
+                return true;
+            }
+
+            idx = afterIdx;
+        }
     }
 
     private static bool IsManifestOrLock(string fullPath)
@@ -626,7 +693,7 @@ public sealed class WslMirrorInstance : IDisposable
         }
 
         // Ensure destination directory exists.
-        using (var mkdir = ToolchainServiceExtensions.RunInWsl(_distroName, "/bin/mkdir", new[] { "-p", linuxDst }, linuxWorkingDir: null, env: ImmutableDictionary<string, string>.Empty, ct))
+        using (var mkdir = ToolchainServiceExtensions.RunInWsl(_distroName, "mkdir", new[] { "-p", linuxDst }, linuxWorkingDir: null, env: ImmutableDictionary<string, string>.Empty, ct))
         {
             await mkdir;
         }
@@ -727,12 +794,10 @@ public sealed class WslMirrorInstance : IDisposable
 
     public void Dispose()
     {
-        if (_disposed)
+        if (Interlocked.Exchange(ref _disposed, 1) == 1)
         {
             return;
         }
-
-        _disposed = true;
 
         try { _workspaceWatcher?.Dispose(); } catch { }
 

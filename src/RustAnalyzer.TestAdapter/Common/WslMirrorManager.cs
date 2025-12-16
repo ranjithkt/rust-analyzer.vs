@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Concurrent;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -53,6 +54,25 @@ public static class WslMirrorManager
             return false;
         }
 
+        // Fast path: if we know the active workspace root, use direct lookup (avoids O(N) scan during build output parsing).
+        if (TargetSystemSelection.TryGetWorkspaceRoot(out var wsRoot))
+        {
+            try
+            {
+                if (anyWorkspacePath.IsContainedIn(wsRoot) &&
+                    TryGet(wsRoot, distroName, out var instFast) &&
+                    instFast?.Config != null &&
+                    WslMirrorPathMapper.TryMirrorLinuxToWindowsPath(linuxPath, instFast.Config, out windowsPath))
+                {
+                    return true;
+                }
+            }
+            catch
+            {
+                // fall back
+            }
+        }
+
         foreach (var inst in Instances.Values)
         {
             var cfg = inst?.Config;
@@ -82,6 +102,29 @@ public static class WslMirrorManager
         }
 
         return false;
+    }
+
+    /// <summary>
+    /// Releases (disposes) all mirror instances associated with the specified workspace root.
+    /// This prevents FileSystemWatcher leaks when workspaces are closed/reopened.
+    /// </summary>
+    public static void ReleaseForWorkspace(PathEx workspaceRootWindows)
+    {
+        var root = workspaceRootWindows.GetFullPath();
+        if (string.IsNullOrWhiteSpace(root))
+        {
+            return;
+        }
+
+        var prefix = root + "|";
+        foreach (var key in Instances.Keys.ToArray())
+        {
+            if (key.StartsWith(prefix, StringComparison.OrdinalIgnoreCase) &&
+                Instances.TryRemove(key, out var inst))
+            {
+                try { inst.Dispose(); } catch { }
+            }
+        }
     }
 
     public static bool TryGetMirrorTargetDirUnc(PathEx workspaceRootWindows, string distroName, out string uncTargetDir)

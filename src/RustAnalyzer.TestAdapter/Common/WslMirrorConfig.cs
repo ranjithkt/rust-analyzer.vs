@@ -72,8 +72,12 @@ public sealed class WslMirrorConfig
     /// <summary>Gets or sets rsync flags tuned for correctness + speed.</summary>
     public string[] RsyncArgsPrefix { get; set; } = new[]
     {
-        "-rt",
+        // -a = recursive + links + perms + times + etc.
+        // Add --no-owner/--no-group so we don't require elevated permissions when syncing into ext4.
+        "-a",
         "--whole-file",
+        "--no-owner",
+        "--no-group",
         "--delete",
         "--modify-window=1",
     };

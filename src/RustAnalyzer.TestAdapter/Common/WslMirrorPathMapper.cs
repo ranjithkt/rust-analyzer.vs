@@ -30,11 +30,10 @@ public static class WslMirrorPathMapper
             return false;
         }
 
-        // Already a Linux path.
+        // This mapper is Windows -> mirror Linux. If the input is already Linux, treat as not-a-Windows-path.
         if (windowsPath.StartsWith("/", StringComparison.Ordinal))
         {
-            mirrorLinuxPath = windowsPath;
-            return true;
+            return false;
         }
 
         // If this is a WSL UNC path, keep it as-is (caller should convert via WslInfo instead).

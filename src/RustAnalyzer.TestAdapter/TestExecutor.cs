@@ -151,12 +151,35 @@ public class TestExecutor : BaseTestExecutor, ITestExecutor
             if (isWsl)
             {
                 // Run test executable via WSL
-                var linuxExe = wslInfo != null
-                    ? wslInfo.ToLinuxPath(exe)
-                    : (WslPathMapper.TryWindowsToWslPath(exe, out var lex) ? lex : null);
-                var linuxWorkingDir = wslInfo != null
-                    ? wslInfo.ToLinuxPath(exe.GetDirectoryName())
-                    : (WslPathMapper.TryWindowsToWslPath(exe.GetDirectoryName(), out var lwd) ? lwd : null);
+                string linuxExe;
+                string linuxWorkingDir;
+
+                if (wslInfo != null)
+                {
+                    // Mode 1 (UNC) or mirror-UNC execution: prefer UNC->Linux mapping.
+                    linuxExe = wslInfo.ToLinuxPath(exe);
+                    linuxWorkingDir = wslInfo.ToLinuxPath(exe.GetDirectoryName());
+                }
+                else
+                {
+                    // Mode 2 (Windows workspace + WSL execution): prefer mirror mapping if an instance is available.
+                    // Avoid initializing the mirror here (can be expensive); just use the existing config if present.
+                    if (TargetSystemSelection.TryGetWorkspaceRoot(out var wsRoot) &&
+                        WslMirrorManager.TryGet(wsRoot, distroName, out var mirror) &&
+                        mirror?.Config != null &&
+                        WslMirrorPathMapper.TryWindowsToMirrorLinuxPath((string)exe, mirror.Config, out var lex) &&
+                        WslMirrorPathMapper.TryWindowsToMirrorLinuxPath((string)exe.GetDirectoryName(), mirror.Config, out var lwd))
+                    {
+                        linuxExe = lex;
+                        linuxWorkingDir = lwd;
+                    }
+                    else
+                    {
+                        // Fallback (legacy): /mnt mapping.
+                        linuxExe = WslPathMapper.TryWindowsToWslPath(exe, out var lex2) ? lex2 : null;
+                        linuxWorkingDir = WslPathMapper.TryWindowsToWslPath(exe.GetDirectoryName(), out var lwd2) ? lwd2 : null;
+                    }
+                }
 
                 if (linuxExe == null || linuxWorkingDir == null)
                 {

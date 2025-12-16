@@ -153,6 +153,14 @@ public class MetadataService : IMetadataService, IDisposable
             if (disposing)
             {
                 // NOTE: Dispose managed state (managed objects).
+                try
+                {
+                    // Best-effort: release mirror watchers tied to this workspace.
+                    WslMirrorManager.ReleaseForWorkspace(_workspaceRoot);
+                }
+                catch
+                {
+                }
             }
 
             DisconnectEvents();
