@@ -191,6 +191,21 @@ Exclusions we should apply by default:
 - `.vs/`
 - `**/*.pdb`, `**/*.obj` (optional)
 
+#### Reference: what VS C++ WSL toolset appears to do (useful patterns)
+From your VS 2026 Linux C++ build logs, the WSL toolset pipeline effectively does:
+
+- **ResolveWSLTarget / ResolveRemoteDir**: determine *which* WSL distro + *where* the remote build root lives.
+- **ConsolidateSourcesToCopy + ValidateSources**: compute and validate the set of inputs that should be mirrored.
+- **PrepareUpToDateChecks**: prepare a mechanism so “copy sources” can be skipped/fast when inputs are unchanged.
+- **CopySources**: perform the copy/sync step (this is where `rsync` fits; in your log it’s ~663ms for the sample).
+- **Build on WSL**: compile/link happens on the remote side after copy.
+- **(Optional) produce a Windows-visible output path**: the log line `... -> C:\\...\\bin\\...\\WslCppTest.out` suggests the toolset may also place/copy the final output somewhere on Windows for the VS project system. For our Rust flow we can avoid copying artifacts back by using UNC (`\\\\wsl.localhost\\...`) for debug/test paths.
+
+How we reuse these concepts:
+- `ResolveWSLTarget/ResolveRemoteDir` ⇒ our `WslMirrorInstance` resolves distro + mirror base + per-workspace mirror root.
+- `PrepareUpToDateChecks` ⇒ we keep a simple “last sync stamp” + dirty tracking to avoid unnecessary rsyncs, while still allowing a forced rsync when needed.
+- `CopySources` ⇒ our rsync invocation(s) for workspace root and external `path` dependency roots.
+
 #### Incremental sync (Option 1: on-build)
 At the start of every WSL cargo operation (build/test/clippy/fmt/metadata):
 
