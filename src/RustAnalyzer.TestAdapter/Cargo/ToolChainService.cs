@@ -707,17 +707,52 @@ public sealed class ToolchainService : IToolchainService
         // NOTE: We need to extract the source_path from the raw JSON BEFORE deserialization,
         // because PathEx constructor converts "/" to "\" which breaks IsLinuxAbsolutePath check.
         string rawSourcePath = null;
+        var jsonForDeserialization = serializedVal;
         try
         {
             var jsonObj = Newtonsoft.Json.Linq.JObject.Parse(serializedVal);
             rawSourcePath = (string)jsonObj["source_path"];
+
+            // IMPORTANT:
+            // In WSL runs, `source_path` can be a Linux absolute path (e.g. /mnt/... or /home/...).
+            // PathEx must never hold Linux absolute paths (it normalizes '/' -> '\', and may be strict).
+            // Rewrite it to a Windows path (UNC for Mode 1, drive path for Mode 2) before deserializing.
+            if (isWsl && !string.IsNullOrWhiteSpace(rawSourcePath) && WslInfo.IsLinuxAbsolutePath(rawSourcePath))
+            {
+                string mapped = null;
+                if (wslInfo != null)
+                {
+                    mapped = wslInfo.ToUncPath(rawSourcePath);
+                }
+                else if (WslPathMapper.TryWslToWindowsPath(rawSourcePath, out var winPath))
+                {
+                    mapped = winPath;
+                }
+                else if (WslMirrorPathMapper.TryMirrorLinuxToWindowsPathBySentinel(rawSourcePath, out var mirrorWin))
+                {
+                    mapped = mirrorWin;
+                }
+
+                if (!string.IsNullOrWhiteSpace(mapped))
+                {
+                    jsonObj["source_path"] = mapped;
+                }
+                else
+                {
+                    // If we cannot map it, remove it so deserialization doesn't throw and consumers get no navigation.
+                    jsonObj.Remove("source_path");
+                    rawSourcePath = null;
+                }
+            }
+
+            jsonForDeserialization = jsonObj.ToString(Newtonsoft.Json.Formatting.None);
         }
         catch
         {
             // If parsing fails, fall back to post-deserialization handling
         }
 
-        var test = JsonConvert.DeserializeObject<TestSuiteInfo.TestInfo>(serializedVal);
+        var test = JsonConvert.DeserializeObject<TestSuiteInfo.TestInfo>(jsonForDeserialization);
 
         if (isWsl && rawSourcePath != null && WslInfo.IsLinuxAbsolutePath(rawSourcePath))
         {
@@ -761,14 +796,21 @@ public sealed class ToolchainService : IToolchainService
             }
             else
             {
-                // Relative path - combine with workspace root
-                test.SourcePath = workspaceRoot + test.SourcePath;
+                // Relative path - combine with workspace root, but guard against missing/uninitialized source_path.
+                if (!string.IsNullOrEmpty(pathStr) && !Path.IsPathRooted(pathStr) && !pathStr.StartsWith(@"\\", StringComparison.Ordinal))
+                {
+                    test.SourcePath = workspaceRoot + test.SourcePath;
+                }
             }
         }
         else
         {
-            // Windows workspace - combine with workspace root
-            test.SourcePath = workspaceRoot + test.SourcePath;
+            // Windows workspace - combine with workspace root, but guard against missing/uninitialized source_path.
+            var pathStr = (string)test.SourcePath;
+            if (!string.IsNullOrEmpty(pathStr) && !Path.IsPathRooted(pathStr) && !pathStr.StartsWith(@"\\", StringComparison.Ordinal))
+            {
+                test.SourcePath = workspaceRoot + test.SourcePath;
+            }
         }
 
         return test;
