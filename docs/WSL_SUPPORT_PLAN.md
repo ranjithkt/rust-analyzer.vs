@@ -1,6 +1,8 @@
 ## Goal
 Add **WSL support** to this Visual Studio (VS) extension so that a user can work on Rust code in Visual Studio and still have **all Rust tool execution happen inside a selected WSL distribution**, while keeping existing **Windows-native behavior unchanged**.
 
+> **Important (repo build tooling)**: This repo is a **Visual Studio / MSBuild** codebase (classic `.csproj` + VSIX). Use **MSBuild** (e.g. from a “Developer Command Prompt for VS”) to build/test it. Do **not** use `dotnet build` / `dotnet test` for repo validation — it can fail or behave differently.
+
 This plan covers two “workspace location” modes:
 
 - **Mode 1 (WSL UNC workspace)**: user opens a folder under `\\wsl.localhost\…` (or `\\wsl$\…`).

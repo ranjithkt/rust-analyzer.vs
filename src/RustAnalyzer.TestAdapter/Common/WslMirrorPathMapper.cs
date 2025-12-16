@@ -54,15 +54,25 @@ public static class WslMirrorPathMapper
             return false;
         }
 
+        // IMPORTANT:
+        // Do NOT call Path.GetFullPath() on arbitrary strings.
+        // When this method is used for argument rewriting, tokens like "build" or "--manifest-path"
+        // must NOT be treated as relative paths and expanded against the current process directory
+        // (which would then incorrectly look like "C:\...\bin\Debug\build" and get mirrored).
+        //
+        // Only normalize if the input already looks like a fully-qualified Windows drive path.
         var normalizedWindowsPath = windowsPath;
-        try
+        if (WindowsDrivePath.IsMatch(normalizedWindowsPath))
         {
-            // Normalize separators and ".." segments so mirror paths are stable even if callers vary.
-            normalizedWindowsPath = Path.GetFullPath(normalizedWindowsPath);
-        }
-        catch
-        {
-            // Best-effort only.
+            try
+            {
+                // Normalize separators and ".." segments so mirror paths are stable even if callers vary.
+                normalizedWindowsPath = Path.GetFullPath(normalizedWindowsPath);
+            }
+            catch
+            {
+                // Best-effort only.
+            }
         }
 
         var m = WindowsDrivePath.Match(normalizedWindowsPath);

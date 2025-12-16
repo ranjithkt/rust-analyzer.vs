@@ -35,7 +35,15 @@
     <DefineConstants>DEBUG;TRACE</DefineConstants>
     <ErrorReport>prompt</ErrorReport>
     <WarningLevel>4</WarningLevel>
-    <DeployExtension>True</DeployExtension>
+    <!--
+      IMPORTANT:
+      Deploying the VSIX during build can fail on developer machines if VS (Experimental) currently has the extension loaded,
+      because files in the extension folder are locked (common VSSDK1081 failure).
+      Keep the nice F5 experience inside VS, but default to no-deploy for command-line builds.
+      (You can always override with /p:DeployExtension=true if you explicitly want deployment.)
+    -->
+    <DeployExtension Condition="'$(BuildingInsideVisualStudio)' == 'true'">True</DeployExtension>
+    <DeployExtension Condition="'$(BuildingInsideVisualStudio)' != 'true'">False</DeployExtension>
   </PropertyGroup>
   <PropertyGroup Condition=" '$(Configuration)|$(Platform)' == 'Release|AnyCPU' ">
     <DebugType>pdbonly</DebugType>

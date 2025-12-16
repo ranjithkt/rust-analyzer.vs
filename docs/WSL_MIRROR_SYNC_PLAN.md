@@ -9,6 +9,8 @@ This document proposes a new strategy:
 
 This is a **plan only** (no implementation here).
 
+> **Important (repo build tooling)**: This repo is a **Visual Studio / MSBuild** codebase (classic `.csproj` + VSIX). Use **MSBuild** (e.g. from a “Developer Command Prompt for VS”) to build/test it. Do **not** use `dotnet build` / `dotnet test` for repo validation — it can fail or behave differently.
+
 ### Recommendation: choose sync-on-build (Option 1)
 Between the two options:
 
