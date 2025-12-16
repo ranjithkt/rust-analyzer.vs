@@ -6,6 +6,7 @@ using System.ComponentModel.Composition;
 using System.IO;
 using System.Linq;
 using System.Runtime.InteropServices;
+using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
@@ -895,6 +896,26 @@ public sealed class ToolchainService : IToolchainService
 
         if (isWsl)
         {
+            // Special-case: cargo fmt should prefer a Windows-native run (when available) for performance.
+            // If cargo.exe/rustfmt are not available on Windows, fall back to WSL fmt (currently /mnt mapping).
+            //
+            // This applies only to Mode 2 (Windows workspace + WSL selected). For Mode 1 (WSL UNC workspace),
+            // we always run inside WSL because sources are already on the Linux filesystem.
+            if (wslInfo == null && IsSourceMutatingCargoOperation(opName))
+            {
+                var fmtResult = await TryRunCargoFmtWindowsNativeAsync(
+                    opName,
+                    arguments,
+                    workingDir,
+                    redirector: new BuildOutputRedirector(outputPane, workingDir, buildMessageReporter, outputPreprocessor),
+                    ct: ct);
+
+                if (fmtResult.HasValue)
+                {
+                    return fmtResult.Value;
+                }
+            }
+
             return await RunWslAsync(
                 wslInfo,
                 distroName,
@@ -917,6 +938,126 @@ public sealed class ToolchainService : IToolchainService
                 redirector: new BuildOutputRedirector(outputPane, workingDir, buildMessageReporter, outputPreprocessor),
                 ct: ct);
         }
+    }
+
+    /// <summary>
+    /// Attempts to run cargo fmt on Windows (cargo.exe) for performance.
+    /// Returns:
+    /// - true/false when a Windows-native fmt was attempted (success indicated by return value),
+    /// - null when cargo.exe is not available on Windows (caller should fall back).
+    /// </summary>
+    private static async Task<bool?> TryRunCargoFmtWindowsNativeAsync(string opName, string arguments, PathEx workingDir, ProcessOutputRedirector redirector, CancellationToken ct)
+    {
+        // Only for fmt.
+        if (!IsSourceMutatingCargoOperation(opName))
+        {
+            return null;
+        }
+
+        // Check for cargo.exe.
+        var cargoExe = Constants.CargoExe.FindInPath();
+        if (string.IsNullOrWhiteSpace(cargoExe) || !File.Exists(cargoExe))
+        {
+            return null;
+        }
+
+        string cargoVersion = string.Empty;
+        string rustfmtVersion = string.Empty;
+        try
+        {
+            // Best-effort: capture versions without invoking WSL detection.
+            using (var v = ProcessRunner.Run(
+                       cargoExe,
+                       new[] { "--version" },
+                       workingDir,
+                       ImmutableDictionary<string, string>.Empty,
+                       ct))
+            {
+                await v;
+                cargoVersion = string.Join(string.Empty, v.StandardOutputLines).Trim();
+            }
+
+            var rustfmtExe = "rustfmt.exe".FindInPath() ?? "rustfmt".FindInPath();
+            if (!string.IsNullOrWhiteSpace(rustfmtExe) && File.Exists(rustfmtExe))
+            {
+                using var rv = ProcessRunner.Run(
+                    rustfmtExe,
+                    new[] { "--version" },
+                    workingDir,
+                    ImmutableDictionary<string, string>.Empty,
+                    ct);
+                await rv;
+                rustfmtVersion = string.Join(string.Empty, rv.StandardOutputLines).Trim();
+            }
+        }
+        catch
+        {
+            // ignore
+        }
+
+        redirector?.WriteLineWithoutProcessing($"");
+        redirector?.WriteLineWithoutProcessing($"==== Build step (Windows): Started ====");
+        if (!string.IsNullOrWhiteSpace(cargoVersion))
+        {
+            redirector?.WriteLineWithoutProcessing($"        Using : {cargoVersion}");
+        }
+
+        if (!string.IsNullOrWhiteSpace(rustfmtVersion))
+        {
+            redirector?.WriteLineWithoutProcessing($"        Using : {rustfmtVersion}");
+        }
+
+        redirector?.WriteLineWithoutProcessing($"         Path : {cargoExe}");
+        redirector?.WriteLineWithoutProcessing($"    Arguments : {arguments}");
+        redirector?.WriteLineWithoutProcessing($"   WorkingDir : {workingDir}");
+        redirector?.WriteLineWithoutProcessing($"");
+
+        using var proc = ProcessRunner.Run(
+            cargoExe,
+            new[] { arguments },
+            workingDir,
+            env: null,
+            visible: false,
+            redirector: redirector,
+            quoteArgs: false,
+            outputEncoding: Encoding.UTF8,
+            cancellationToken: ct);
+
+        var whnd = proc.WaitHandle;
+        if (whnd == null)
+        {
+            redirector?.WriteErrorLineWithoutProcessing($"Error - Failed to start '{cargoExe}'");
+            redirector?.WriteLineWithoutProcessing("==== Build step (Windows): Finished ====\n");
+            return false;
+        }
+
+        try
+        {
+            await Task.Run(() => whnd.WaitOne(), ct);
+        }
+        catch (OperationCanceledException)
+        {
+            proc.Kill();
+            redirector?.WriteErrorLineWithoutProcessing("====  Build step (Windows) canceled ====\n");
+            return false;
+        }
+
+        proc.Wait();
+        redirector?.WriteLineWithoutProcessing("==== Build step (Windows): Finished ====\n");
+
+        // If Windows-native fmt failed because rustfmt isn't installed on Windows, fall back to WSL fmt.
+        // (Other failures should be surfaced to the user; WSL would likely fail similarly.)
+        if (proc.ExitCode != 0)
+        {
+            var stderr = string.Join("\n", proc.StandardErrorLines ?? Array.Empty<string>());
+            var lower = stderr.ToLowerInvariant();
+            if (lower.Contains("rustfmt") && (lower.Contains("not installed") || lower.Contains("not found") || lower.Contains("not recognized") || lower.Contains("could not execute")))
+            {
+                return null;
+            }
+        }
+
+        return proc.ExitCode == 0;
     }
 
     private static async Task<bool> RunAsync(PathEx exeFullPath, string opName, string arguments, PathEx workingDir, ProcessOutputRedirector redirector, CancellationToken ct)
